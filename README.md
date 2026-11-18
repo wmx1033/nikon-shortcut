@@ -84,7 +84,7 @@
 | --- | --- |
 | `尼康相框水印-脚本.sh` | 内嵌的 shell + Swift 完整源码 |
 | `assets/` | README 展示用的效果图与各品牌 logo |
-| `LICENSE` | CC BY-NC 4.0 许可证 |
+| `LICENSE` | GPL-3.0 许可证 |
 
 > 可直接导入的 `.shortcut` 文件不存放在仓库中，请到 [Releases](../../releases) 页面下载。
 
@@ -101,4 +101,4 @@
 
 ## License
 
-本项目采用 [CC BY-NC 4.0（署名-非商业性使用 4.0 国际）](https://creativecommons.org/licenses/by-nc/4.0/) 许可证，禁止用于商业用途。完整条款见 [LICENSE](LICENSE)。
+本项目采用 [GNU General Public License v3.0（GPL-3.0）](https://www.gnu.org/licenses/gpl-3.0.html) 许可证。完整条款见 [LICENSE](LICENSE)。
