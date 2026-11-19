@@ -67,9 +67,20 @@ func outputURL(_ input: URL) -> URL {
 func comment(of url: URL) -> String {
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
-          let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any],
-          let text = exif[kCGImagePropertyExifUserComment as String] as? String else { return "" }
-    return text.replacingOccurrences(of: "\0", with: "")
+          let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] else { return "" }
+    let value = exif[kCGImagePropertyExifUserComment as String]
+    if let text = value as? String { return text.replacingOccurrences(of: "\0", with: "") }
+    if let data = value as? Data {
+        if data.count >= 8 {
+            let header = String(data: data.prefix(8), encoding: .ascii) ?? ""
+            let payload = Data(data.dropFirst(8))
+            if header.hasPrefix("UNICODE"), let text = String(data: payload, encoding: .utf16LittleEndian) ?? String(data: payload, encoding: .utf16) {
+                return text.replacingOccurrences(of: "\0", with: "")
+            }
+        }
+        return String(data: data, encoding: .utf8)?.replacingOccurrences(of: "\0", with: "") ?? ""
+    }
+    return ""
 }
 
 func colorLabel(_ url: URL) -> String {
@@ -124,7 +135,8 @@ let canon = try writeJPEG(name: "canon.jpg", space: srgb, make: "Canon", model: 
 let infix = try writeJPEG(name: "旅行-相框素材.jpg", space: srgb)
 let framed = try writeJPEG(name: "done-相框.jpg", space: srgb)
 let framedNumber = try writeJPEG(name: "done-相框-2.jpg", space: srgb)
-let note = try writeJPEG(name: "note.jpg", space: srgb, comment: "夜景")
+let note = try writeJPEG(name: "note.jpg", space: srgb, comment: "sunset")
+let cjk = try writeJPEG(name: "cjk.jpg", space: srgb, comment: "夜景")
 let oldMarker = try writeJPEG(name: "old.jpg", space: srgb, comment: "NIKON-WATERMARK")
 let newMarker = try writeJPEG(name: "marked.jpg", space: srgb, comment: "WATERMARK")
 let adobeFile = try writeJPEG(name: "adobe.jpg", space: adobe, make: "NIKON CORPORATION", model: "NIKON Z 8")
@@ -138,9 +150,8 @@ expect(p3Before.lowercased().contains("p3"), "样张确实是 Display P3", p3Bef
 let errorPipe = Pipe()
 let proc = Process()
 proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
+proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, cjk.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
 proc.standardError = errorPipe
-proc.standardOutput = Pipe()
 try proc.run()
 proc.waitUntilExit()
 let errText = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -154,6 +165,7 @@ expect(produced(sony), "索尼缺型号的照片会输出")
 expect(produced(canon), "佳能照片会输出")
 expect(produced(infix), "文件名中段含相框的原片会输出")
 expect(produced(note), "带普通注释的照片会输出")
+expect(produced(cjk), "带中文注释的照片会输出")
 expect(produced(nikonMake), "只有 Make 的尼康会输出")
 expect(produced(nikonModel), "只有 Model 的尼康会输出")
 expect(skipped(framed), "以 -相框 结尾的文件被跳过")
@@ -174,11 +186,13 @@ expect(nikonMakeYellow > 30, "尼康 Make 会画黄标", "yellow=\(nikonMakeYell
 expect(nikonModelYellow > 30, "尼康 Model 会画黄标", "yellow=\(nikonModelYellow)")
 
 let noteComment = comment(of: outputURL(note))
-expect(noteComment.contains("夜景") && noteComment.contains("WATERMARK"), "原注释保留并追加 WATERMARK", noteComment)
-if let noteRange = noteComment.range(of: "夜景"), let markRange = noteComment.range(of: "WATERMARK") {
-    expect(noteRange.lowerBound < markRange.lowerBound, "标记在原注释之后", noteComment)
+expect(noteComment == "sunset\nWATERMARK", "英文注释保留并追加 WATERMARK", noteComment)
+let cjkComment = comment(of: outputURL(cjk))
+expect(cjkComment.contains("夜景") && cjkComment.contains("WATERMARK"), "中文注释保留并追加 WATERMARK", cjkComment)
+if let noteRange = cjkComment.range(of: "夜景"), let markRange = cjkComment.range(of: "WATERMARK") {
+    expect(noteRange.lowerBound < markRange.lowerBound, "标记在原注释之后", cjkComment)
 } else {
-    expect(false, "标记在原注释之后", noteComment)
+    expect(false, "标记在原注释之后", cjkComment)
 }
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))
 
