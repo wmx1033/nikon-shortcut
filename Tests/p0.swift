@@ -142,7 +142,7 @@ let framedNumber = try writeJPEG(name: "done-相框-2.jpg", space: srgb)
 let note = try writeJPEG(name: "note.jpg", space: srgb, comment: "sunset")
 let doNot = try writeJPEG(name: "do-not.jpg", space: srgb, comment: "DO NOT WATERMARK")
 let noMark = try writeJPEG(name: "no-mark.jpg", space: srgb, comment: "NO WATERMARK")
-let cjk = try writeJPEG(name: "cjk.jpg", space: srgb, comment: "夜景")
+let cjk = try writeJPEG(name: "cjk.jpg", space: srgb)
 let jisFile = try writeJPEG(name: "jis.jpg", space: srgb)
 let binaryFile = try writeJPEG(name: "binary.jpg", space: srgb)
 let logic = root.appendingPathComponent("Tests/run-logic.sh")
@@ -161,6 +161,10 @@ func runLogic(_ args: [String]) throws -> String {
 let jisBytes: [UInt8] = [0x4A, 0x49, 0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B, 0x24, 0x42, 0x46, 0x7C, 0x4B, 0x5C, 0x1B, 0x28, 0x42]
 let blob: [UInt8] = [0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81, 0x82, 0x83, 0xC0, 0xC1]
 func hex(_ bytes: [UInt8]) -> String { bytes.map { String(format: "%02X", $0) }.joined(separator: " ") }
+var cjkBytes = Data("UNICODE".utf8)
+cjkBytes.append(0)
+cjkBytes.append(contentsOf: "夜景".data(using: .utf16) ?? Data())
+try runLogic(["patch", cjk.path, hex([UInt8](cjkBytes))])
 try runLogic(["patch", jisFile.path, hex(jisBytes)])
 try runLogic(["patch", binaryFile.path, hex(blob)])
 let oldMarker = try writeJPEG(name: "old.jpg", space: srgb, comment: "NIKON-WATERMARK")
@@ -256,7 +260,7 @@ let after = try Data(contentsOf: renamed)
 expect(second.terminationStatus == 0 && secondText.contains("binary-renamed.jpg") && secondText.contains("跳过"), "改名后的二进制成片被跳过", secondText)
 expect(before == after && !FileManager.default.fileExists(atPath: outputURL(renamed).path), "跳过时文件没有被改写")
 let cjkText = textFromCommentHex((try fileComment(outputURL(cjk))).hex)
-expect(cjkText.hasPrefix("WATERMARK") && cjkText.contains("夜"), "中文注释的标记写在前面并保留下来", cjkText)
+expect(cjkText.hasPrefix("WATERMARK") && cjkText.contains("夜景"), "中文注释的标记写在前面并保留夜景", cjkText)
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))
 
 let adobeAfter = colorLabel(outputURL(adobeFile))
