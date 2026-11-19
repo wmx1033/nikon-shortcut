@@ -269,20 +269,10 @@ func tiffBySettingUserComment(_ tiffData: Data, _ comment: Data, readOnly: Bool 
         if commentAt == nil, let exifIFD { commentAt = located(tiff, ifd: exifIFD, tag: 0x9286) }
     }
     if readOnly { return commentAt.flatMap { bytes(at: $0) } }
+    func align() { if tiff.count % 2 == 1 { tiff.append(0) } }
+    align()
     let valueAt = tiff.count
     if comment.count > 4 { tiff.append(comment) }
-    if let commentAt {
-        setBytes(put16(7), commentAt + 2)
-        setBytes(put32(UInt32(comment.count)), commentAt + 4)
-        if comment.count <= 4 {
-            var inline = [UInt8](comment)
-            while inline.count < 4 { inline.append(0) }
-            setBytes(inline, commentAt + 8)
-        } else {
-            setBytes(put32(UInt32(valueAt)), commentAt + 8)
-        }
-        return tiff
-    }
     func inlineEntry(tag: UInt16, type: UInt16, count: UInt32, bytes: Data) -> Data {
         var inline = Data(bytes)
         while inline.count < 4 { inline.append(0) }
@@ -299,26 +289,55 @@ func tiffBySettingUserComment(_ tiffData: Data, _ comment: Data, readOnly: Bool 
         data.append(contentsOf: put32(value))
         return data
     }
-    func copiedIFD(_ ifd: Int, extra: Data) -> Int? {
+    func directoryEnd(_ ifd: Int) -> Int? {
         guard ifd >= 8, ifd + 2 <= tiff.count else { return nil }
         let count = Int(u16(tiff, ifd))
-        let bytes = 2 + count * 12 + 4
-        guard count < 10000, ifd + bytes <= tiff.count else { return nil }
-        var block = Data(tiff[ifd..<(ifd + bytes - 4)])
-        let countBytes = put16(UInt16(count + 1))
-        block[0] = countBytes[0]
-        block[1] = countBytes[1]
-        block.append(extra)
-        block.append(tiff[(ifd + bytes - 4)..<(ifd + bytes)])
+        let end = ifd + 2 + count * 12 + 4
+        guard count < 10000, end <= tiff.count else { return nil }
+        return end
+    }
+    func copiedIFD(_ ifd: Int, extra: Data) -> Int? {
+        guard extra.count == 12, let end = directoryEnd(ifd) else { return nil }
+        let count = Int(u16(tiff, ifd))
+        let extraTag = u16(extra, 0)
+        var entries: [Data] = []
+        var replaced = false
+        for item in 0..<count {
+            let entry = Data(tiff[(ifd + 2 + item * 12)..<(ifd + 2 + item * 12 + 12)])
+            if u16(entry, 0) == extraTag {
+                entries.append(extra)
+                replaced = true
+            } else {
+                entries.append(entry)
+            }
+        }
+        if !replaced { entries.append(extra) }
+        entries.sort { u16($0, 0) < u16($1, 0) }
+        let next = Data(tiff[(end - 4)..<end])
+        align()
         let at = tiff.count
+        var block = Data(put16(UInt16(entries.count)))
+        for entry in entries { block.append(entry) }
+        block.append(next)
         tiff.append(block)
         return at
     }
     let commentEntry = comment.count <= 4 ? inlineEntry(tag: 0x9286, type: 7, count: UInt32(comment.count), bytes: comment) : entry(tag: 0x9286, type: 7, count: UInt32(comment.count), value: UInt32(valueAt))
+    if let commentAt {
+        if let exifIFD, let exifEntry, let end = directoryEnd(exifIFD), (exifIFD..<end).contains(commentAt),
+           let moved = copiedIFD(exifIFD, extra: commentEntry) {
+            setBytes(put32(UInt32(moved)), exifEntry + 8)
+            return tiff
+        }
+        guard let moved = copiedIFD(ifd0, extra: commentEntry) else { return nil }
+        setBytes(put32(UInt32(moved)), 4)
+        return tiff
+    }
     if let exifEntry, let exifIFD, let moved = copiedIFD(exifIFD, extra: commentEntry) {
         setBytes(put32(UInt32(moved)), exifEntry + 8)
         return tiff
     }
+    align()
     let exifAt = tiff.count
     var exif = Data(put16(1))
     exif.append(commentEntry)

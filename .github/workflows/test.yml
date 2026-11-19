@@ -13,6 +13,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: 安装 ExifTool
+        run: brew install exiftool
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
       - name: 纯逻辑
         run: bash Tests/run-logic.sh
       - name: 用脚本处理样张

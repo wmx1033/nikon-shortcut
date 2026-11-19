@@ -30,7 +30,7 @@ func expect(_ condition: Bool, _ name: String, _ detail: String = "") {
     }
 }
 
-func writeJPEG(name: String, space: CGColorSpace, make: String? = nil, model: String? = nil, comment: String? = nil) throws -> URL {
+func writeJPEG(name: String, space: CGColorSpace, make: String? = nil, model: String? = nil, comment: String? = nil, pixelX: Int? = nil, pixelY: Int? = nil) throws -> URL {
     let url = work.appendingPathComponent(name)
     guard let ctx = CGContext(
         data: nil, width: 640, height: 400, bitsPerComponent: 8, bytesPerRow: 0,
@@ -56,9 +56,11 @@ func writeJPEG(name: String, space: CGColorSpace, make: String? = nil, model: St
     if let make { tiff[kCGImagePropertyTIFFMake as String] = make }
     if let model { tiff[kCGImagePropertyTIFFModel as String] = model }
     if !tiff.isEmpty { props[kCGImagePropertyTIFFDictionary as String] = tiff }
-    if let comment {
-        props[kCGImagePropertyExifDictionary as String] = [kCGImagePropertyExifUserComment as String: comment]
-    }
+    var exif: [String: Any] = [:]
+    if let comment { exif[kCGImagePropertyExifUserComment as String] = comment }
+    if let pixelX { exif[kCGImagePropertyExifPixelXDimension as String] = pixelX }
+    if let pixelY { exif[kCGImagePropertyExifPixelYDimension as String] = pixelY }
+    if !exif.isEmpty { props[kCGImagePropertyExifDictionary as String] = exif }
     CGImageDestinationAddImage(dest, image, props as CFDictionary)
     guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
     return url
@@ -170,6 +172,8 @@ try runLogic(["patch", cjk.path, hex([UInt8](cjkBytes))])
 try runLogic(["patch", jisFile.path, hex(jisBytes)])
 try runLogic(["patch", binaryFile.path, hex(blob)])
 try runLogic(["patch", zeroFile.path, hex(zeroBytes)])
+let layout = try writeJPEG(name: "layout.jpg", space: srgb, make: "NIKON CORPORATION", model: "NIKON Z 8", pixelX: 640, pixelY: 400)
+try runLogic(["patch", layout.path, hex(blob)])
 let oldMarker = try writeJPEG(name: "old.jpg", space: srgb, comment: "NIKON-WATERMARK")
 let newMarker = try writeJPEG(name: "marked.jpg", space: srgb, comment: "WATERMARK")
 let adobeFile = try writeJPEG(name: "adobe.jpg", space: adobe, make: "NIKON CORPORATION", model: "NIKON Z 8")
@@ -183,7 +187,7 @@ expect(p3Before.lowercased().contains("p3"), "样张确实是 Display P3", p3Bef
 let errorPipe = Pipe()
 let proc = Process()
 proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, doNot.path, noMark.path, cjk.path, jisFile.path, binaryFile.path, zeroFile.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
+proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, doNot.path, noMark.path, cjk.path, jisFile.path, binaryFile.path, zeroFile.path, layout.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
 proc.standardError = errorPipe
 try proc.run()
 proc.waitUntilExit()
@@ -204,6 +208,7 @@ expect(produced(cjk), "带中文注释的照片会输出")
 expect(produced(jisFile), "JIS 注释会输出")
 expect(produced(binaryFile), "无法解码的注释会输出")
 expect(produced(zeroFile), "全零头注释会输出")
+expect(produced(layout), "带尺寸标签的尼康会输出")
 expect(produced(nikonMake), "只有 Make 的尼康会输出")
 expect(produced(nikonModel), "只有 Model 的尼康会输出")
 expect(skipped(framed), "以 -相框 结尾的文件被跳过")
@@ -252,6 +257,40 @@ expect(binaryRead.xmp, "无法解码的注释带有 XMP 标记")
 let zeroRead = try fileComment(outputURL(zeroFile))
 expect(zeroRead.hex == hex(zeroBytes), "全零头注释逐字节保留", zeroRead.hex)
 expect(zeroRead.xmp, "全零头注释带有 XMP 标记")
+let layoutOrder = try runLogic(["order", outputURL(layout).path])
+func orderField(_ report: String, _ key: String) -> [String] {
+    let line = report.split(separator: "\n").map(String.init).first { $0.hasPrefix(key + " ") } ?? ""
+    return line.split(separator: " ").map(String.init)
+}
+let layoutTags = orderField(layoutOrder, "exif").last?.split(separator: ",").map(String.init) ?? []
+func tagBefore(_ tags: [String], _ left: String, _ right: String) -> Bool {
+    guard let earlier = tags.firstIndex(of: left), let later = tags.firstIndex(of: right) else { return false }
+    return earlier < later && tags.filter { $0 == left }.count == 1
+}
+expect(tagBefore(layoutTags, "9286", "A002") && tagBefore(layoutTags, "9286", "A003"), "成片里 0x9286 只有一个且排在尺寸标签前", layoutOrder)
+let layoutComment = orderField(layoutOrder, "comment").dropFirst(3).joined(separator: " ")
+expect(layoutComment == hex(blob), "成片注释与输入逐字节一致", layoutComment)
+func exiftoolReport(_ url: URL) -> String {
+    let output = Pipe()
+    let errors = Pipe()
+    let tool = Process()
+    tool.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    tool.arguments = ["exiftool", "-validate", "-warning", "-error", "-a", "-G1", "-s", "-ExifImageWidth", "-ExifImageHeight", "-GPSLatitude", "-GPSLongitude", url.path]
+    tool.standardOutput = output
+    tool.standardError = errors
+    do { try tool.run() } catch { return "exiftool missing" }
+    tool.waitUntilExit()
+    let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let error = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    return text + error
+}
+let layoutTool = exiftoolReport(outputURL(layout))
+let layoutWarnings = layoutTool.split(separator: "\n").map(String.init).filter { line in
+    let lower = line.lowercased()
+    return ["odd offset", "out of order", "out of sequence", "bad offset", "invalid offset"].contains { lower.contains($0) }
+}.joined(separator: " | ")
+expect(layoutTool.contains("ExifImageWidth") && layoutTool.contains("ExifImageHeight"), "ExifTool 能读到两个尺寸标签", layoutTool)
+expect(layoutWarnings.isEmpty, "成片没有目录顺序或偏移警告", layoutTool)
 let renamed = work.appendingPathComponent("binary-renamed.jpg")
 try FileManager.default.copyItem(at: outputURL(binaryFile), to: renamed)
 let before = try Data(contentsOf: renamed)
