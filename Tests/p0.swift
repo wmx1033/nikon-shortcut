@@ -255,8 +255,8 @@ let secondText = String(data: secondErr.fileHandleForReading.readDataToEndOfFile
 let after = try Data(contentsOf: renamed)
 expect(second.terminationStatus == 0 && secondText.contains("binary-renamed.jpg") && secondText.contains("跳过"), "改名后的二进制成片被跳过", secondText)
 expect(before == after && !FileManager.default.fileExists(atPath: outputURL(renamed).path), "跳过时文件没有被改写")
-let cjkComment = comment(of: outputURL(cjk))
-expect(cjkComment.hasPrefix("WATERMARK"), "中文注释的标记写在前面并保留下来", cjkComment)
+let cjkText = textFromCommentHex((try fileComment(outputURL(cjk))).hex)
+expect(cjkText.hasPrefix("WATERMARK") && cjkText.contains("夜"), "中文注释的标记写在前面并保留下来", cjkText)
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))
 
 let adobeAfter = colorLabel(outputURL(adobeFile))
