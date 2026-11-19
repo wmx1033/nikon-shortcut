@@ -284,7 +284,9 @@ for path in CommandLine.arguments.dropFirst() {
         outMeta[kCGImagePropertyPixelWidth as String] = nil
         outMeta[kCGImagePropertyPixelHeight as String] = nil
         outMeta[kCGImagePropertyProfileName as String] = nil
-        if color.convertsToSRGB { outMeta[kCGImagePropertyICCProfile as String] = nil }
+        if color.convertsToSRGB {
+            for key in Array(outMeta.keys) where key.uppercased().contains("ICC") { outMeta.removeValue(forKey: key) }
+        }
         outMeta[kCGImagePropertyColorModel as String] = nil
         outMeta[kCGImagePropertyDepth as String] = nil
         outMeta[kCGImagePropertyDPIWidth as String] = nil
