@@ -94,15 +94,6 @@ func userCommentWithMarker(_ value: Any?) -> Any {
     return text.trimmingCharacters(in:.whitespacesAndNewlines) + "\n" + watermarkMarker
 }
 
-func imageIOUserComment(_ value: Any) -> Any {
-    guard let text = value as? String else { return value }
-    if text.utf8.allSatisfy({ $0 < 128 }) { return text }
-    var data = Data("UNICODE".utf8)
-    data.append(0)
-    data.append(contentsOf: text.data(using: .utf16LittleEndian) ?? Data())
-    return data
-}
-
 func colorSpaceNeedsSRGB(_ name: String?) -> Bool {
     guard let name = name else { return true }
     return ["kCGColorSpaceAdobeRGB1998", "kCGColorSpaceROMMRGB", "kCGColorSpaceWideGamutRGB"].contains(name)
@@ -302,7 +293,7 @@ for path in CommandLine.arguments.dropFirst() {
         outMeta[kCGImagePropertyDPIHeight as String] = nil
         outMeta[kCGImagePropertyHasAlpha as String] = nil
         var outExif = (outMeta[kCGImagePropertyExifDictionary as String] as? [String: Any]) ?? [:]
-        outExif[kCGImagePropertyExifUserComment as String] = imageIOUserComment(userCommentWithMarker(outExif[kCGImagePropertyExifUserComment as String]))
+        outExif[kCGImagePropertyExifUserComment as String] = userCommentWithMarker(outExif[kCGImagePropertyExifUserComment as String])
         outMeta[kCGImagePropertyExifDictionary as String] = outExif
         outMeta[kCGImageDestinationLossyCompressionQuality as String] = 0.96
         CGImageDestinationAddImage(dest,image,outMeta as CFDictionary)
