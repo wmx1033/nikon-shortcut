@@ -7,7 +7,106 @@ import UniformTypeIdentifiers
 import CoreLocation
 
 var placeCache: [String:String] = [:]
-let watermarkMarker = "NIKON-WATERMARK"
+let watermarkMarker = "WATERMARK"
+
+func isWatermarkFileName(_ stem: String) -> Bool {
+    stem.range(of:"-相框(?:-\\d+)?$", options:.regularExpression) != nil
+}
+
+func normalizeCommentText(_ text: String) -> String {
+    guard text.contains("\0") else { return text }
+    for code in ["UNICODE", "Unicode", "ASCII", "JIS"] where text.hasPrefix(code) {
+        var rest = text.dropFirst(code.count)
+        while rest.first == "\0" { rest = rest.dropFirst() }
+        return rest.replacingOccurrences(of:"\0", with:"")
+    }
+    return text.replacingOccurrences(of:"\0", with:"")
+}
+
+func commentScore(_ text: String) -> Int {
+    var score = 0
+    for scalar in text.unicodeScalars {
+        let value = scalar.value
+        if value == 0xFFFD { score -= 20; continue }
+        if value < 32 && value != 9 && value != 10 && value != 13 { score -= 5; continue }
+        if (32...126).contains(value) { score += 5; continue }
+        if (0x4E00...0x9FFF).contains(value) || (0x3400...0x4DBF).contains(value) || (0x3040...0x30FF).contains(value) || (0xAC00...0xD7AF).contains(value) { score += 4; continue }
+        if scalar.properties.isAlphabetic { score += 1; continue }
+        score -= 2
+    }
+    return score
+}
+
+func decodedUTF16Comment(_ payload: Data) -> String? {
+    if payload.count >= 2 {
+        let prefix = [UInt8](payload.prefix(2))
+        if prefix == [0xFF, 0xFE] || prefix == [0xFE, 0xFF],
+           let decoded = String(data:payload, encoding:.utf16) {
+            let cleaned = normalizeCommentText(decoded)
+            if !cleaned.isEmpty { return cleaned }
+        }
+    }
+    let candidates = [String.Encoding.utf16LittleEndian, .utf16BigEndian].compactMap { encoding -> String? in
+        guard let decoded = String(data:payload, encoding:encoding) else { return nil }
+        let cleaned = normalizeCommentText(decoded)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+    return candidates.max(by:{ commentScore($0) < commentScore($1) })
+}
+
+func decodedExifUserComment(_ data: Data) -> String? {
+    func text(_ data: Data, _ encodings: [String.Encoding]) -> String? {
+        for encoding in encodings {
+            if let decoded = String(data:data, encoding:encoding) {
+                let cleaned = normalizeCommentText(decoded)
+                if !cleaned.isEmpty { return cleaned }
+            }
+        }
+        return nil
+    }
+    if data.count < 8 { return text(data, [.utf8, .isoLatin1]) ?? "" }
+    let header = String(data:Data(data.prefix(8)), encoding:.ascii) ?? ""
+    let payload = Data(data.dropFirst(8))
+    if header.hasPrefix("UNICODE") { return decodedUTF16Comment(payload) }
+    if header.hasPrefix("ASCII") || header.hasPrefix("JIS") || (header.count == 8 && header.allSatisfy { $0 == "\0" }) {
+        return text(payload, [.utf8, .isoLatin1]) ?? ""
+    }
+    return text(data, [.utf8])
+}
+
+func exifCommentText(_ value: Any?) -> String? {
+    if let text = value as? String { return normalizeCommentText(text) }
+    if let data = value as? Data { return decodedExifUserComment(data) }
+    return nil
+}
+
+func containsWatermarkMarker(_ value: Any?) -> Bool {
+    exifCommentText(value)?.contains(watermarkMarker) == true
+}
+
+func userCommentWithMarker(_ value: Any?) -> Any {
+    guard let text = exifCommentText(value) else {
+        if let value = value { return value }
+        return watermarkMarker
+    }
+    if text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { return watermarkMarker }
+    if text.contains(watermarkMarker) { return text }
+    return text.trimmingCharacters(in:.whitespacesAndNewlines) + "\n" + watermarkMarker
+}
+
+func colorSpaceNeedsSRGB(_ name: String?) -> Bool {
+    guard let name = name else { return true }
+    return ["kCGColorSpaceAdobeRGB1998", "kCGColorSpaceROMMRGB", "kCGColorSpaceWideGamutRGB"].contains(name)
+}
+
+func renderedColor(for photo: CGImage) -> (space: CGColorSpace, convertsToSRGB: Bool) {
+    let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+    guard let space = photo.colorSpace else { return (srgb, true) }
+    let name = space.name as String?
+    if colorSpaceNeedsSRGB(name) { return (srgb, true) }
+    return (space, false)
+}
+
 func locationCaption(_ metadata:[String:Any]) -> String {
     guard let gps = metadata["{GPS}"] as? [String:Any],
           let lat = gps["Latitude"] as? Double, let lon = gps["Longitude"] as? Double,
@@ -57,18 +156,10 @@ func shutterString(_ t: Double) -> String {
     return "1/\(format(r)) s"
 }
 
-func workingColorSpace(for photo: CGImage) -> CGColorSpace {
-    let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
-    guard let space = photo.colorSpace, let name = space.name as String? else { return srgb }
-    let workingSpaces: Set<String> = ["kCGColorSpaceAdobeRGB1998", "kCGColorSpaceROMMRGB", "kCGColorSpaceWideGamutRGB"]
-    if workingSpaces.contains(name) { return srgb }
-    return space
-}
-
 for path in CommandLine.arguments.dropFirst() {
     do {
         let url = URL(fileURLWithPath: path)
-        if url.deletingPathExtension().lastPathComponent.contains("-相框") {
+        if isWatermarkFileName(url.deletingPathExtension().lastPathComponent) {
             FileHandle.standardError.write(Data(("跳过：\(path)（已经是带水印的文件）\n").utf8))
             continue
         }
@@ -76,7 +167,7 @@ for path in CommandLine.arguments.dropFirst() {
               let meta = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
               let w = meta["PixelWidth"] as? Int, let h = meta["PixelHeight"] as? Int else { throw CocoaError(.fileReadCorruptFile) }
         let srcExif = meta[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
-        if (srcExif[kCGImagePropertyExifUserComment as String] as? String) == watermarkMarker {
+        if containsWatermarkMarker(srcExif[kCGImagePropertyExifUserComment as String]) {
             FileHandle.standardError.write(Data(("跳过：\(path)（EXIF 标记已带水印）\n").utf8))
             continue
         }
@@ -86,14 +177,15 @@ for path in CommandLine.arguments.dropFirst() {
         let width = CGFloat(photo.width), height = CGFloat(photo.height)
         let edge = max(1, (width * 0.022).rounded())
         let band = max(8, (width * 0.079).rounded())
-        guard let ctx = CGContext(data:nil,width:Int(width+2*edge),height:Int(height+band+edge),bitsPerComponent:8,bytesPerRow:0,space:workingColorSpace(for:photo),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw CocoaError(.fileWriteUnknown) }
+        let color = renderedColor(for: photo)
+        guard let ctx = CGContext(data:nil,width:Int(width+2*edge),height:Int(height+band+edge),bitsPerComponent:8,bytesPerRow:0,space:color.space,bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw CocoaError(.fileWriteUnknown) }
         ctx.setFillColor(CGColor(gray:1,alpha:1))
         ctx.fill(CGRect(x:0,y:0,width:width+2*edge,height:height+band+edge))
         ctx.draw(photo,in:CGRect(x:edge,y:band,width:width,height:height))
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext:ctx, flipped:false)
         let ex = meta["{Exif}"] as? [String:Any] ?? [:]
-        let model = (meta["{TIFF}"] as? [String:Any])?["Model"] as? String ?? "Nikon"
+        let model = ((meta["{TIFF}"] as? [String:Any])?["Model"] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
         var fields = [String]()
         if let f = ex["FocalLength"] as? NSNumber { fields.append("\(f) mm") }
         if let f = ex["FNumber"] as? NSNumber { fields.append("f/\(f)") }
@@ -192,13 +284,14 @@ for path in CommandLine.arguments.dropFirst() {
         outMeta[kCGImagePropertyPixelWidth as String] = nil
         outMeta[kCGImagePropertyPixelHeight as String] = nil
         outMeta[kCGImagePropertyProfileName as String] = nil
+        if color.convertsToSRGB { outMeta[kCGImagePropertyICCProfile as String] = nil }
         outMeta[kCGImagePropertyColorModel as String] = nil
         outMeta[kCGImagePropertyDepth as String] = nil
         outMeta[kCGImagePropertyDPIWidth as String] = nil
         outMeta[kCGImagePropertyDPIHeight as String] = nil
         outMeta[kCGImagePropertyHasAlpha as String] = nil
         var outExif = (outMeta[kCGImagePropertyExifDictionary as String] as? [String: Any]) ?? [:]
-        outExif[kCGImagePropertyExifUserComment as String] = watermarkMarker
+        outExif[kCGImagePropertyExifUserComment as String] = userCommentWithMarker(outExif[kCGImagePropertyExifUserComment as String])
         outMeta[kCGImagePropertyExifDictionary as String] = outExif
         outMeta[kCGImageDestinationLossyCompressionQuality as String] = 0.96
         CGImageDestinationAddImage(dest,image,outMeta as CFDictionary)
