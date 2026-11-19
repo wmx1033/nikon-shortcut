@@ -145,6 +145,7 @@ let noMark = try writeJPEG(name: "no-mark.jpg", space: srgb, comment: "NO WATERM
 let cjk = try writeJPEG(name: "cjk.jpg", space: srgb)
 let jisFile = try writeJPEG(name: "jis.jpg", space: srgb)
 let binaryFile = try writeJPEG(name: "binary.jpg", space: srgb)
+let zeroFile = try writeJPEG(name: "zero.jpg", space: srgb)
 let logic = root.appendingPathComponent("Tests/run-logic.sh")
 func runLogic(_ args: [String]) throws -> String {
     let pipe = Pipe()
@@ -160,6 +161,7 @@ func runLogic(_ args: [String]) throws -> String {
 }
 let jisBytes: [UInt8] = [0x4A, 0x49, 0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B, 0x24, 0x42, 0x46, 0x7C, 0x4B, 0x5C, 0x1B, 0x28, 0x42]
 let blob: [UInt8] = [0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81, 0x82, 0x83, 0xC0, 0xC1]
+let zeroBytes: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0xFF, 0x00]
 func hex(_ bytes: [UInt8]) -> String { bytes.map { String(format: "%02X", $0) }.joined(separator: " ") }
 var cjkBytes = Data("UNICODE".utf8)
 cjkBytes.append(0)
@@ -167,6 +169,7 @@ cjkBytes.append(contentsOf: "夜景".data(using: .utf16) ?? Data())
 try runLogic(["patch", cjk.path, hex([UInt8](cjkBytes))])
 try runLogic(["patch", jisFile.path, hex(jisBytes)])
 try runLogic(["patch", binaryFile.path, hex(blob)])
+try runLogic(["patch", zeroFile.path, hex(zeroBytes)])
 let oldMarker = try writeJPEG(name: "old.jpg", space: srgb, comment: "NIKON-WATERMARK")
 let newMarker = try writeJPEG(name: "marked.jpg", space: srgb, comment: "WATERMARK")
 let adobeFile = try writeJPEG(name: "adobe.jpg", space: adobe, make: "NIKON CORPORATION", model: "NIKON Z 8")
@@ -180,7 +183,7 @@ expect(p3Before.lowercased().contains("p3"), "样张确实是 Display P3", p3Bef
 let errorPipe = Pipe()
 let proc = Process()
 proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, doNot.path, noMark.path, cjk.path, jisFile.path, binaryFile.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
+proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, doNot.path, noMark.path, cjk.path, jisFile.path, binaryFile.path, zeroFile.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
 proc.standardError = errorPipe
 try proc.run()
 proc.waitUntilExit()
@@ -200,6 +203,7 @@ expect(produced(noMark), "NO WATERMARK 会输出")
 expect(produced(cjk), "带中文注释的照片会输出")
 expect(produced(jisFile), "JIS 注释会输出")
 expect(produced(binaryFile), "无法解码的注释会输出")
+expect(produced(zeroFile), "全零头注释会输出")
 expect(produced(nikonMake), "只有 Make 的尼康会输出")
 expect(produced(nikonModel), "只有 Model 的尼康会输出")
 expect(skipped(framed), "以 -相框 结尾的文件被跳过")
@@ -245,6 +249,9 @@ expect(jisText.contains("日本") && !jisText.contains("\u{1B}") && jisText.cont
 let binaryRead = try fileComment(outputURL(binaryFile))
 expect(binaryRead.hex == hex(blob), "无法解码的注释逐字节保留", binaryRead.hex)
 expect(binaryRead.xmp, "无法解码的注释带有 XMP 标记")
+let zeroRead = try fileComment(outputURL(zeroFile))
+expect(zeroRead.hex == hex(zeroBytes), "全零头注释逐字节保留", zeroRead.hex)
+expect(zeroRead.xmp, "全零头注释带有 XMP 标记")
 let renamed = work.appendingPathComponent("binary-renamed.jpg")
 try FileManager.default.copyItem(at: outputURL(binaryFile), to: renamed)
 let before = try Data(contentsOf: renamed)

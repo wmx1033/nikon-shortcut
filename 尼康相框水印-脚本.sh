@@ -59,7 +59,8 @@ func decodedExifUserComment(_ data: Data, byteOrder: String.Encoding? = nil) -> 
         if cleaned.isEmpty || cleaned.contains("\u{1B}") { return nil }
         return cleaned
     }
-    if header.hasPrefix("ASCII") || (header.count == 8 && header.allSatisfy { $0 == "\0" }) {
+    if header.count == 8 && header.allSatisfy({ $0 == "\0" }) { return nil }
+    if header.hasPrefix("ASCII") {
         return text(payload, [.utf8, .isoLatin1]) ?? ""
     }
     return text(data, [.utf8])
@@ -113,7 +114,7 @@ func jpegHasXMPMarker(_ jpeg: Data) -> Bool {
     }
     return false
 }
-func jpegByAddingXMPMarker(_ jpeg: Data) -> Data {
+func jpegByAddingXMPMarker(_ jpeg: Data) -> Data? {
     if jpegHasXMPMarker(jpeg) { return jpeg }
     var payload = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
     let packet = """
@@ -128,7 +129,19 @@ func jpegByAddingXMPMarker(_ jpeg: Data) -> Data {
     <?xpacket end="w"?>
     """
     payload.append(contentsOf: Data(packet.utf8))
-    return insertJPEGSegment(jpeg, payload: payload) ?? jpeg
+    return insertJPEGSegment(jpeg, payload: payload)
+}
+func committedJPEG(_ jpeg: Data, restoreComment: Data?, stampXMP: Bool) -> Data? {
+    var output = jpeg
+    if let restoreComment = restoreComment {
+        guard let patched = jpegByReplacingUserComment(output, restoreComment) else { return nil }
+        output = patched
+    }
+    if stampXMP {
+        guard let stamped = jpegByAddingXMPMarker(output) else { return nil }
+        output = stamped
+    }
+    return output
 }
 func jpegByReplacingUserComment(_ jpeg: Data, _ comment: Data) -> Data? {
     let signature = Data("Exif\0\0".utf8)
@@ -536,9 +549,9 @@ for path in CommandLine.arguments.dropFirst() {
         outMeta[kCGImageDestinationLossyCompressionQuality as String] = 0.96
         CGImageDestinationAddImage(dest,image,outMeta as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
-        var output = data as Data
-        if let restoreComment = restoreComment, let patched = jpegByReplacingUserComment(output, restoreComment) { output = patched }
-        if stampXMP { output = jpegByAddingXMPMarker(output) }
+        guard let output = committedJPEG(data as Data, restoreComment: restoreComment, stampXMP: stampXMP) else {
+            throw NSError(domain: "NikonWatermark", code: 1, userInfo: [NSLocalizedDescriptionKey: "EXIF 注释写回失败"])
+        }
         var n = 1
         while true {
             let suffix = n == 1 ? "" : "-\(n)"
