@@ -140,7 +140,29 @@ let infix = try writeJPEG(name: "旅行-相框素材.jpg", space: srgb)
 let framed = try writeJPEG(name: "done-相框.jpg", space: srgb)
 let framedNumber = try writeJPEG(name: "done-相框-2.jpg", space: srgb)
 let note = try writeJPEG(name: "note.jpg", space: srgb, comment: "sunset")
+let doNot = try writeJPEG(name: "do-not.jpg", space: srgb, comment: "DO NOT WATERMARK")
+let noMark = try writeJPEG(name: "no-mark.jpg", space: srgb, comment: "NO WATERMARK")
 let cjk = try writeJPEG(name: "cjk.jpg", space: srgb, comment: "夜景")
+let jisFile = try writeJPEG(name: "jis.jpg", space: srgb)
+let binaryFile = try writeJPEG(name: "binary.jpg", space: srgb)
+let logic = root.appendingPathComponent("Tests/run-logic.sh")
+func runLogic(_ args: [String]) throws -> String {
+    let pipe = Pipe()
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+    proc.arguments = [logic.path] + args
+    proc.standardOutput = pipe
+    try proc.run()
+    proc.waitUntilExit()
+    let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    if proc.terminationStatus != 0 { throw CocoaError(.fileWriteUnknown) }
+    return text
+}
+let jisBytes: [UInt8] = [0x4A, 0x49, 0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B, 0x24, 0x42, 0x46, 0x7C, 0x4B, 0x5C, 0x1B, 0x28, 0x42]
+let blob: [UInt8] = [0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81, 0x82, 0x83, 0xC0, 0xC1]
+func hex(_ bytes: [UInt8]) -> String { bytes.map { String(format: "%02X", $0) }.joined(separator: " ") }
+try runLogic(["patch", jisFile.path, hex(jisBytes)])
+try runLogic(["patch", binaryFile.path, hex(blob)])
 let oldMarker = try writeJPEG(name: "old.jpg", space: srgb, comment: "NIKON-WATERMARK")
 let newMarker = try writeJPEG(name: "marked.jpg", space: srgb, comment: "WATERMARK")
 let adobeFile = try writeJPEG(name: "adobe.jpg", space: adobe, make: "NIKON CORPORATION", model: "NIKON Z 8")
@@ -154,7 +176,7 @@ expect(p3Before.lowercased().contains("p3"), "样张确实是 Display P3", p3Bef
 let errorPipe = Pipe()
 let proc = Process()
 proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, cjk.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
+proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, doNot.path, noMark.path, cjk.path, jisFile.path, binaryFile.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
 proc.standardError = errorPipe
 try proc.run()
 proc.waitUntilExit()
@@ -169,7 +191,11 @@ expect(produced(sony), "索尼缺型号的照片会输出")
 expect(produced(canon), "佳能照片会输出")
 expect(produced(infix), "文件名中段含相框的原片会输出")
 expect(produced(note), "带普通注释的照片会输出")
+expect(produced(doNot), "DO NOT WATERMARK 会输出")
+expect(produced(noMark), "NO WATERMARK 会输出")
 expect(produced(cjk), "带中文注释的照片会输出")
+expect(produced(jisFile), "JIS 注释会输出")
+expect(produced(binaryFile), "无法解码的注释会输出")
 expect(produced(nikonMake), "只有 Make 的尼康会输出")
 expect(produced(nikonModel), "只有 Model 的尼康会输出")
 expect(skipped(framed), "以 -相框 结尾的文件被跳过")
@@ -191,6 +217,44 @@ expect(nikonModelYellow > 30, "尼康 Model 会画黄标", "yellow=\(nikonModelY
 
 let noteComment = comment(of: outputURL(note))
 expect(noteComment == "sunset\nWATERMARK", "英文注释保留并追加 WATERMARK", noteComment)
+expect(comment(of: outputURL(doNot)) == "DO NOT WATERMARK\nWATERMARK", "DO NOT WATERMARK 保留原文并只加一个标记", comment(of: outputURL(doNot)))
+expect(comment(of: outputURL(noMark)) == "NO WATERMARK\nWATERMARK", "NO WATERMARK 保留原文并只加一个标记", comment(of: outputURL(noMark)))
+func fileComment(_ url: URL) throws -> (hex: String, xmp: Bool) {
+    let text = try runLogic(["read", url.path])
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    let marker = lines.count > 1 ? lines[1] : ""
+    return (lines.first ?? "", marker == "XMP yes")
+}
+func textFromCommentHex(_ hexText: String) -> String {
+    let bytes = hexText.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+    let data = Data(bytes)
+    guard data.count >= 8 else { return "" }
+    let header = String(data: data.prefix(8), encoding: .ascii) ?? ""
+    let payload = Data(data.dropFirst(8))
+    if header.hasPrefix("UNICODE") { return String(data: payload, encoding: .utf16)?.replacingOccurrences(of: "\0", with: "") ?? "" }
+    if header.hasPrefix("JIS") { return String(data: payload, encoding: .iso2022JP) ?? "" }
+    return String(data: payload, encoding: .utf8) ?? ""
+}
+let jisRead = try fileComment(outputURL(jisFile))
+let jisText = textFromCommentHex(jisRead.hex)
+expect(jisText.contains("日本") && !jisText.contains("\u{1B}") && jisText.contains("WATERMARK"), "JIS 注释写回后仍是日本且标记可读", show(jisText))
+let binaryRead = try fileComment(outputURL(binaryFile))
+expect(binaryRead.hex == hex(blob), "无法解码的注释逐字节保留", binaryRead.hex)
+expect(binaryRead.xmp, "无法解码的注释带有 XMP 标记")
+let renamed = work.appendingPathComponent("binary-renamed.jpg")
+try FileManager.default.copyItem(at: outputURL(binaryFile), to: renamed)
+let before = try Data(contentsOf: renamed)
+let secondErr = Pipe()
+let second = Process()
+second.executableURL = URL(fileURLWithPath: "/bin/bash")
+second.arguments = [script.path, renamed.path]
+second.standardError = secondErr
+try second.run()
+second.waitUntilExit()
+let secondText = String(data: secondErr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+let after = try Data(contentsOf: renamed)
+expect(second.terminationStatus == 0 && secondText.contains("binary-renamed.jpg") && secondText.contains("跳过"), "改名后的二进制成片被跳过", secondText)
+expect(before == after && !FileManager.default.fileExists(atPath: outputURL(renamed).path), "跳过时文件没有被改写")
 let cjkComment = comment(of: outputURL(cjk))
 expect(cjkComment.hasPrefix("WATERMARK"), "中文注释的标记写在前面并保留下来", cjkComment)
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))
