@@ -135,15 +135,15 @@ expect(adobeBefore.lowercased().contains("adobe"), "样张确实是 Adobe RGB", 
 let p3Before = colorLabel(p3File)
 expect(p3Before.lowercased().contains("p3"), "样张确实是 Display P3", p3Before)
 
-let stderr = Pipe()
+let errorPipe = Pipe()
 let proc = Process()
 proc.executableURL = URL(fileURLWithPath: "/bin/bash")
 proc.arguments = [script.path, plain.path, sony.path, nikonMake.path, nikonModel.path, canon.path, infix.path, framed.path, framedNumber.path, note.path, oldMarker.path, newMarker.path, adobeFile.path, p3File.path]
-proc.standardError = stderr
+proc.standardError = errorPipe
 proc.standardOutput = Pipe()
 try proc.run()
 proc.waitUntilExit()
-let errText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+let errText = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
 expect(proc.terminationStatus == 0, "脚本正常结束", "exit \(proc.terminationStatus)\n\(errText)")
 
 func skipped(_ url: URL) -> Bool { !FileManager.default.fileExists(atPath: outputURL(url).path) }
