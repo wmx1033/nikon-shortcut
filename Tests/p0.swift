@@ -127,6 +127,44 @@ guard let adobe = CGColorSpace(name: CGColorSpace.adobeRGB1998),
     exit(1)
 }
 
+func rawComment(_ url: URL) -> String {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+          let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] else { return "no-exif" }
+    guard let value = exif[kCGImagePropertyExifUserComment as String] else { return "nil keys=\(Array(exif.keys))" }
+    if let data = value as? Data {
+        let hex = data.prefix(48).map { String(format: "%02X", $0) }.joined(separator: " ")
+        return "data \(data.count) \(hex) text=\(comment(of: url))"
+    }
+    return "\(type(of: value)) \(value) text=\(comment(of: url))"
+}
+
+func probe(_ label: String, _ value: Any) throws {
+    let url = work.appendingPathComponent("probe-\(label).jpg")
+    guard let ctx = CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 0, space: srgb, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+          let image = ctx.makeImage(),
+          let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+    ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+    let props: [String: Any] = [
+        kCGImagePropertyExifDictionary as String: [kCGImagePropertyExifUserComment as String: value]
+    ]
+    CGImageDestinationAddImage(dest, image, props as CFDictionary)
+    CGImageDestinationFinalize(dest)
+    print("PROBE \(label) \(rawComment(url))")
+}
+
+let cjkText = "夜景\nWATERMARK"
+var unicodeLE = Data("UNICODE".utf8)
+unicodeLE.append(0)
+unicodeLE.append(contentsOf: cjkText.data(using: .utf16LittleEndian) ?? Data())
+var unicodeBOM = Data("UNICODE".utf8)
+unicodeBOM.append(0)
+unicodeBOM.append(contentsOf: cjkText.data(using: .utf16) ?? Data())
+try probe("string", cjkText)
+try probe("unicode-le", unicodeLE)
+try probe("unicode-bom", unicodeBOM)
+
 let plain = try writeJPEG(name: "plain.jpg", space: srgb)
 let sony = try writeJPEG(name: "sony.jpg", space: srgb, make: "SONY")
 let nikonMake = try writeJPEG(name: "nikon-make.jpg", space: srgb, make: "NIKON CORPORATION")
