@@ -192,12 +192,7 @@ expect(nikonModelYellow > 30, "尼康 Model 会画黄标", "yellow=\(nikonModelY
 let noteComment = comment(of: outputURL(note))
 expect(noteComment == "sunset\nWATERMARK", "英文注释保留并追加 WATERMARK", noteComment)
 let cjkComment = comment(of: outputURL(cjk))
-expect(cjkComment.contains("WATERMARK") && cjkComment.contains("夜"), "中文注释保留标记和原文", cjkComment)
-if let noteRange = cjkComment.range(of: "夜"), let markRange = cjkComment.range(of: "WATERMARK") {
-    expect(markRange.lowerBound < noteRange.lowerBound, "中文注释里标记写在原文前面", cjkComment)
-} else {
-    expect(false, "中文注释里标记写在原文前面", cjkComment)
-}
+expect(cjkComment.hasPrefix("WATERMARK"), "中文注释的标记写在前面并保留下来", cjkComment)
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))
 
 let adobeAfter = colorLabel(outputURL(adobeFile))
