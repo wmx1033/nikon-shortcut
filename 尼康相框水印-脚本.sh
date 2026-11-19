@@ -91,7 +91,9 @@ func userCommentWithMarker(_ value: Any?) -> Any {
     }
     if text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { return watermarkMarker }
     if text.contains(watermarkMarker) { return text }
-    return text.trimmingCharacters(in:.whitespacesAndNewlines) + "\n" + watermarkMarker
+    let trimmed = text.trimmingCharacters(in:.whitespacesAndNewlines)
+    if trimmed.utf8.contains(where: { $0 >= 128 }) { return watermarkMarker + "\n" + trimmed }
+    return trimmed + "\n" + watermarkMarker
 }
 
 func colorSpaceNeedsSRGB(_ name: String?) -> Bool {

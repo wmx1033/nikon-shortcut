@@ -15,7 +15,7 @@
 - 英文地点：根据 GPS 反地理编码为「国家, 城市」；城市州（新加坡、摩纳哥、梵蒂冈等）只显示城市名
 - 镜头品牌 logo：NIKKOR、适马、腾龙、唯卓仕、铭匠、七工匠、老蛙、三阳、思锐、美科、福伦达、图丽（支持英文与中文别名识别）
 - 尼康机身 logo：按型号区分（Z6 II、Z30，以及其他 Z 系列）
-- 保留完整 EXIF / TIFF / GPS 元数据；原有 `UserComment` 保留，末尾追加 `WATERMARK`
+- 保留完整 EXIF / TIFF / GPS 元数据；原有 `UserComment` 保留，并写入 `WATERMARK`
 - 色域保留：sRGB、Display P3 原样保留；Adobe RGB / ProPhoto RGB 等「工作色域」统一转为 sRGB，并去掉原来的 ICC 配置
 - 防重复水印：文件名以 `-相框` 或 `-相框-数字` 结尾，或 EXIF `UserComment` 含有 `WATERMARK` 的已处理文件自动跳过
 - 容错：损坏文件、非图片文件自动跳过，不中断整批处理
@@ -48,7 +48,7 @@
 ## 输出说明
 
 - 格式：JPEG，质量 0.96
-- 元数据：保留原图的 EXIF / TIFF / GPS。原有 `UserComment` 保留，末尾追加 `WATERMARK`
+- 元数据：保留原图的 EXIF / TIFF / GPS。原有 `UserComment` 保留，并写入 `WATERMARK`。英文注释的标记在末尾；含非 ASCII 时标记放在前面，避免系统截断后丢掉标记
 - 色域：sRGB、Display P3 原样保留；Adobe RGB / ProPhoto RGB 转为 sRGB，并按 sRGB 写出色彩配置
 - 地点：照片无 GPS 或离线时，地点行静默留空（不报错）
 
