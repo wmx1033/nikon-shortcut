@@ -120,6 +120,11 @@ func xmpJPEG(_ inner: String) -> Data {
 check("alt prefix attribute", jpegHasXMPMarker(xmpJPEG("<rdf:Description ns1:Marker=\"WATERMARK\" xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\"/>")))
 check("alt prefix element", jpegHasXMPMarker(xmpJPEG("<ns1:Marker xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\">WATERMARK</ns1:Marker>")))
 check("unicode prefix element", jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:标记=\"http://ns.nikon-shortcut/watermark/1.0/\"><标记:Marker>WATERMARK</标记:Marker></rdf:Description>")))
+let zwnj = "\u{200C}"
+check("colon zwnj is one grapheme", (":" + zwnj).count == 1 && (":" + zwnj).unicodeScalars.count == 2)
+check("xmlns prefix misses zwnj", !("xmlns:" + zwnj).hasPrefix("xmlns:"))
+check("zwnj prefix element", jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:\(zwnj)p=\"http://ns.nikon-shortcut/watermark/1.0/\"><\(zwnj)p:Marker>WATERMARK</\(zwnj)p:Marker></rdf:Description>")))
+check("zwnj prefix attribute", jpegHasXMPMarker(xmpJPEG("<rdf:Description \(zwnj)p:Marker=\"WATERMARK\" xmlns:\(zwnj)p=\"http://ns.nikon-shortcut/watermark/1.0/\"/>")))
 func resizedPrefix(_ data: Data, _ prefix: String) -> Data {
     let bytes = [UInt8](data)
     let signature = [UInt8]("http://ns.adobe.com/xap/1.0/\0".utf8)
@@ -162,6 +167,8 @@ func resizedPrefix(_ data: Data, _ prefix: String) -> Data {
 }
 let resized = resizedPrefix(binaryFile, "标记")
 check("resized unicode prefix matches", jpegHasXMPMarker(resized) && jpegUserComment(resized) == blob)
+let resizedZwnj = resizedPrefix(binaryFile, "\u{200C}p")
+check("resized zwnj prefix matches", jpegHasXMPMarker(resizedZwnj) && jpegUserComment(resizedZwnj) == blob)
 check("ancestor prefix", jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\"><rdf:Description ns1:Marker=\"WATERMARK\"/></rdf:Description>")))
 check("other namespace ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:watermark=\"http://example.com/other/\"><watermark:Marker>WATERMARK</watermark:Marker></rdf:Description>")))
 check("shadowed namespace ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:watermark=\"http://ns.nikon-shortcut/watermark/1.0/\"><rdf:Description xmlns:watermark=\"http://example.com/other/\" watermark:Marker=\"WATERMARK\"/></rdf:Description>")))

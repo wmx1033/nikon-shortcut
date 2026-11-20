@@ -382,6 +382,7 @@ func expectRenamedPrefix(_ prefix: String, _ filename: String, _ title: String) 
 }
 try expectRenamedPrefix("nsprefix1", "prefix-renamed.jpg", "更换前缀")
 try expectRenamedPrefix("标记", "xmp-unicode-prefix.jpg", "Unicode 前缀")
+try expectRenamedPrefix("\u{200C}p", "xmp-zwnj-prefix.jpg", "U+200C 前缀")
 let cjkText = textFromCommentHex((try fileComment(outputURL(cjk))).hex)
 expect(cjkText.hasPrefix("WATERMARK") && cjkText.contains("夜景"), "中文注释的标记写在前面并保留夜景", cjkText)
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))

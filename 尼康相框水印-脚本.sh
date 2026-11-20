@@ -116,15 +116,40 @@ func xmpText(_ data: Data) -> String {
 }
 func xmpHasMarker(_ xml: String) -> Bool {
     var index = xml.startIndex
-    var scopes: [[String: String]] = [[:]]
+    var scopes: [[[UInt32]: String]] = [[:]]
+    let xmlnsName = Array("xmlns".unicodeScalars.map { $0.value })
+    let markerName = Array(xmpMarkerLocalName.unicodeScalars.map { $0.value })
     func skipSpace() {
-        while index < xml.endIndex, xml[index].isWhitespace { index = xml.index(after: index) }
+        let scalars = xml.unicodeScalars
+        while index < xml.endIndex {
+            let value = scalars[index].value
+            guard value == 0x20 || value == 0x09 || value == 0x0D || value == 0x0A else { return }
+            index = scalars.index(after: index)
+        }
     }
-    func hasToken(_ token: String) -> Bool { xml[index...].hasPrefix(token) }
+    func hasToken(_ token: String) -> Bool {
+        let scalars = xml.unicodeScalars
+        var cursor = index
+        for scalar in token.unicodeScalars {
+            guard cursor < xml.endIndex, scalars[cursor] == scalar else { return false }
+            cursor = scalars.index(after: cursor)
+        }
+        return true
+    }
     func take(_ token: String) -> Bool {
         guard hasToken(token) else { return false }
-        index = xml.index(index, offsetBy: token.count)
+        for _ in token.unicodeScalars { index = xml.unicodeScalars.index(after: index) }
         return true
+    }
+    func slice(_ from: String.Index, _ to: String.Index) -> String {
+        let scalars = xml.unicodeScalars
+        var text = ""
+        var cursor = from
+        while cursor < to {
+            text.unicodeScalars.append(scalars[cursor])
+            cursor = scalars.index(after: cursor)
+        }
+        return text
     }
     func isNCNameStart(_ value: UInt32) -> Bool {
         switch value {
@@ -147,34 +172,29 @@ func xmpHasMarker(_ xml: String) -> Bool {
             return false
         }
     }
-    func readNCName() -> String? {
+    func readNCName() -> [UInt32]? {
         let scalars = xml.unicodeScalars
         guard index < xml.endIndex, isNCNameStart(scalars[index].value) else { return nil }
-        var name = ""
-        name.unicodeScalars.append(scalars[index])
+        var name: [UInt32] = [scalars[index].value]
         index = scalars.index(after: index)
         while index < xml.endIndex, isNCNameChar(scalars[index].value) {
-            name.unicodeScalars.append(scalars[index])
+            name.append(scalars[index].value)
             index = scalars.index(after: index)
         }
         return name
     }
-    func readName() -> String? {
+    func readName() -> (prefix: [UInt32], local: [UInt32])? {
         skipSpace()
-        guard var name = readNCName() else { return nil }
-        guard index < xml.endIndex, scalarsValue(index) == 0x3A else { return name }
+        guard let first = readNCName() else { return nil }
+        let scalars = xml.unicodeScalars
+        guard index < xml.endIndex, scalars[index].value == 0x3A else { return ([], first) }
         let saved = index
-        index = xml.unicodeScalars.index(after: index)
+        index = scalars.index(after: index)
         guard let local = readNCName() else {
             index = saved
-            return name
+            return ([], first)
         }
-        name.append(":")
-        name.append(local)
-        return name
-    }
-    func scalarsValue(_ at: String.Index) -> UInt32 {
-        xml.unicodeScalars[at].value
+        return (first, local)
     }
     func decodeEntities(_ raw: String) -> String {
         var decoded = ""
@@ -208,30 +228,28 @@ func xmpHasMarker(_ xml: String) -> Bool {
     }
     func readQuoted() -> String? {
         skipSpace()
-        guard index < xml.endIndex, xml[index] == "\"" || xml[index] == "'" else { return nil }
-        let quote = xml[index]
-        index = xml.index(after: index)
+        let scalars = xml.unicodeScalars
+        guard index < xml.endIndex else { return nil }
+        let quote = scalars[index].value
+        guard quote == 0x22 || quote == 0x27 else { return nil }
+        index = scalars.index(after: index)
         var raw = ""
-        while index < xml.endIndex, xml[index] != quote {
-            raw.append(xml[index])
-            index = xml.index(after: index)
+        while index < xml.endIndex, scalars[index].value != quote {
+            raw.unicodeScalars.append(scalars[index])
+            index = scalars.index(after: index)
         }
         guard index < xml.endIndex else { return nil }
-        index = xml.index(after: index)
+        index = scalars.index(after: index)
         return decodeEntities(raw)
     }
-    func parts(_ name: String) -> (prefix: String, local: String) {
-        guard let colon = name.firstIndex(of: ":") else { return ("", name) }
-        return (String(name[..<colon]), String(name[name.index(after: colon)...]))
-    }
-    func namespaceURI(_ prefix: String) -> String? {
+    func namespaceURI(_ prefix: [UInt32]) -> String? {
         for scope in scopes.reversed() {
             if let uri = scope[prefix] { return uri }
         }
         return nil
     }
-    func markerValue(_ prefix: String, _ local: String, _ value: String, attribute: Bool) -> Bool {
-        guard local == xmpMarkerLocalName else { return false }
+    func markerValue(_ prefix: [UInt32], _ local: [UInt32], _ value: String, attribute: Bool) -> Bool {
+        guard local == markerName else { return false }
         guard value.trimmingCharacters(in: .whitespacesAndNewlines) == watermarkMarker else { return false }
         if attribute && prefix.isEmpty { return false }
         return namespaceURI(prefix) == xmpMarkerNamespace
@@ -240,11 +258,12 @@ func xmpHasMarker(_ xml: String) -> Bool {
         var text = ""
         var found = false
         var element = false
+        let scalars = xml.unicodeScalars
         while index < xml.endIndex {
-            if xml[index] != "<" {
+            if scalars[index].value != 0x3C {
                 let start = index
-                while index < xml.endIndex, xml[index] != "<" { index = xml.index(after: index) }
-                text += decodeEntities(String(xml[start..<index]))
+                while index < xml.endIndex, scalars[index].value != 0x3C { index = scalars.index(after: index) }
+                text += decodeEntities(slice(start, index))
                 continue
             }
             if hasToken("</") { break }
@@ -253,8 +272,9 @@ func xmpHasMarker(_ xml: String) -> Bool {
             if take("<![CDATA[") {
                 let start = index
                 if !takeUntil("]]>") { break }
-                let end = xml.index(index, offsetBy: -3)
-                text += xml[start..<end]
+                var end = index
+                for _ in 0..<3 { end = scalars.index(before: end) }
+                text += slice(start, end)
                 continue
             }
             element = true
@@ -263,16 +283,32 @@ func xmpHasMarker(_ xml: String) -> Bool {
         return (text, found, element)
     }
     func takeUntil(_ token: String) -> Bool {
-        guard let range = xml.range(of: token, range: index..<xml.endIndex) else { return false }
-        index = range.upperBound
-        return true
+        let scalars = xml.unicodeScalars
+        let needle = Array(token.unicodeScalars)
+        var cursor = index
+        while cursor < xml.endIndex {
+            var probe = cursor
+            var matched = true
+            for scalar in needle {
+                if probe >= xml.endIndex || scalars[probe] != scalar {
+                    matched = false
+                    break
+                }
+                probe = scalars.index(after: probe)
+            }
+            if matched {
+                index = probe
+                return true
+            }
+            cursor = scalars.index(after: cursor)
+        }
+        return false
     }
     func parseElement() -> Bool {
         guard take("<") else { return false }
-        guard let rawName = readName() else { return false }
-        let name = parts(rawName)
-        var attributes: [(String, String, String)] = []
-        var declared: [String: String] = [:]
+        guard let name = readName() else { return false }
+        var attributes: [([UInt32], [UInt32], String)] = []
+        var declared: [[UInt32]: String] = [:]
         var selfClosing = false
         while index < xml.endIndex {
             skipSpace()
@@ -281,13 +317,12 @@ func xmpHasMarker(_ xml: String) -> Bool {
             guard let attrName = readName() else { return false }
             skipSpace()
             guard take("="), let attrValue = readQuoted() else { return false }
-            if attrName == "xmlns" {
-                declared[""] = attrValue
-            } else if attrName.hasPrefix("xmlns:") {
-                declared[String(attrName.dropFirst("xmlns:".count))] = attrValue
+            if attrName.prefix.isEmpty && attrName.local == xmlnsName {
+                declared[[]] = attrValue
+            } else if attrName.prefix == xmlnsName {
+                declared[attrName.local] = attrValue
             } else {
-                let attr = parts(attrName)
-                attributes.append((attr.prefix, attr.local, attrValue))
+                attributes.append((attrName.prefix, attrName.local, attrValue))
             }
         }
         scopes.append(declared)
@@ -308,7 +343,9 @@ func xmpHasMarker(_ xml: String) -> Bool {
         }
         return found
     }
-    if index < xml.endIndex, xml[index] == "\u{FEFF}" { index = xml.index(after: index) }
+    if index < xml.endIndex, xml.unicodeScalars[index].value == 0xFEFF {
+        index = xml.unicodeScalars.index(after: index)
+    }
     return parseContent().found
 }
 func jpegHasXMPMarker(_ jpeg: Data) -> Bool {
