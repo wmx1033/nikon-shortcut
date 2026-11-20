@@ -126,25 +126,55 @@ func xmpHasMarker(_ xml: String) -> Bool {
         index = xml.index(index, offsetBy: token.count)
         return true
     }
-    func isNameStart(_ char: Character) -> Bool {
-        guard let ascii = char.asciiValue else { return false }
-        return (ascii >= 65 && ascii <= 90) || (ascii >= 97 && ascii <= 122) || char == "_"
+    func isNCNameStart(_ value: UInt32) -> Bool {
+        switch value {
+        case 0x41...0x5A, 0x5F, 0x61...0x7A,
+             0xC0...0xD6, 0xD8...0xF6, 0xF8...0x2FF,
+             0x370...0x37D, 0x37F...0x1FFF, 0x200C...0x200D,
+             0x2070...0x218F, 0x2C00...0x2FEF, 0x3001...0xD7FF,
+             0xF900...0xFDCF, 0xFDF0...0xFFFD, 0x10000...0xEFFFF:
+            return true
+        default:
+            return false
+        }
     }
-    func isNameNext(_ char: Character) -> Bool {
-        if isNameStart(char) || char == "-" || char == "." || char == ":" { return true }
-        guard let ascii = char.asciiValue else { return false }
-        return ascii >= 48 && ascii <= 57
+    func isNCNameChar(_ value: UInt32) -> Bool {
+        if isNCNameStart(value) { return true }
+        switch value {
+        case 0x2D, 0x2E, 0x30...0x39, 0xB7, 0x300...0x36F, 0x203F, 0x2040:
+            return true
+        default:
+            return false
+        }
+    }
+    func readNCName() -> String? {
+        let scalars = xml.unicodeScalars
+        guard index < xml.endIndex, isNCNameStart(scalars[index].value) else { return nil }
+        var name = ""
+        name.unicodeScalars.append(scalars[index])
+        index = scalars.index(after: index)
+        while index < xml.endIndex, isNCNameChar(scalars[index].value) {
+            name.unicodeScalars.append(scalars[index])
+            index = scalars.index(after: index)
+        }
+        return name
     }
     func readName() -> String? {
         skipSpace()
-        guard index < xml.endIndex, isNameStart(xml[index]) else { return nil }
-        var name = String(xml[index])
-        index = xml.index(after: index)
-        while index < xml.endIndex, isNameNext(xml[index]) {
-            name.append(xml[index])
-            index = xml.index(after: index)
+        guard var name = readNCName() else { return nil }
+        guard index < xml.endIndex, scalarsValue(index) == 0x3A else { return name }
+        let saved = index
+        index = xml.unicodeScalars.index(after: index)
+        guard let local = readNCName() else {
+            index = saved
+            return name
         }
+        name.append(":")
+        name.append(local)
         return name
+    }
+    func scalarsValue(_ at: String.Index) -> UInt32 {
+        xml.unicodeScalars[at].value
     }
     func decodeEntities(_ raw: String) -> String {
         var decoded = ""

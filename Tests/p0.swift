@@ -305,21 +305,6 @@ let secondText = String(data: secondErr.fileHandleForReading.readDataToEndOfFile
 let after = try Data(contentsOf: renamed)
 expect(second.terminationStatus == 0 && secondText.contains("binary-renamed.jpg") && secondText.contains("跳过"), "改名后的二进制成片被跳过", secondText)
 expect(before == after && !FileManager.default.fileExists(atPath: outputURL(renamed).path), "跳过时文件没有被改写")
-func swapASCII(_ data: Data, _ from: String, _ to: String) -> Data {
-    let source = [UInt8](from.utf8)
-    let target = [UInt8](to.utf8)
-    var bytes = [UInt8](data)
-    var cursor = 0
-    while cursor + source.count <= bytes.count {
-        if Array(bytes[cursor..<(cursor + source.count)]) == source {
-            for offset in 0..<target.count { bytes[cursor + offset] = target[offset] }
-            cursor += source.count
-        } else {
-            cursor += 1
-        }
-    }
-    return Data(bytes)
-}
 func rangeOfASCII(_ bytes: [UInt8], _ needle: [UInt8], _ start: Int) -> Int? {
     var index = start
     while index + needle.count <= bytes.count {
@@ -328,33 +313,75 @@ func rangeOfASCII(_ bytes: [UInt8], _ needle: [UInt8], _ start: Int) -> Int? {
     }
     return nil
 }
-func swapXMPPrefix(_ data: Data) -> Data {
+func countOfASCII(_ bytes: [UInt8], _ needle: [UInt8]) -> Int {
+    var count = 0
+    var index = 0
+    while let found = rangeOfASCII(bytes, needle, index) {
+        count += 1
+        index = found + needle.count
+    }
+    return count
+}
+func replaceUTF8(_ data: Data, _ from: String, _ to: String) -> Data {
+    let source = [UInt8](from.utf8)
+    let target = [UInt8](to.utf8)
+    let bytes = [UInt8](data)
+    var output: [UInt8] = []
+    var cursor = 0
+    while cursor < bytes.count {
+        if cursor + source.count <= bytes.count, Array(bytes[cursor..<(cursor + source.count)]) == source {
+            output.append(contentsOf: target)
+            cursor += source.count
+        } else {
+            output.append(bytes[cursor])
+            cursor += 1
+        }
+    }
+    return Data(output)
+}
+func jpegWithXMPPrefix(_ data: Data, _ prefix: String) -> Data {
     let bytes = [UInt8](data)
     let signature = [UInt8]("http://ns.adobe.com/xap/1.0/\0".utf8)
-    let ending = [UInt8]("<?xpacket end=\"w\"?>".utf8)
-    guard let start = rangeOfASCII(bytes, signature, 0), let end = rangeOfASCII(bytes, ending, start) else { return data }
-    let packetEnd = end + ending.count
-    let packet = swapASCII(swapASCII(Data(bytes[start..<packetEnd]), "xmlns:watermark=", "xmlns:nsprefix1="), "watermark:Marker", "nsprefix1:Marker")
-    return Data(bytes[..<start]) + packet + Data(bytes[packetEnd...])
+    guard let start = rangeOfASCII(bytes, signature, 0), start >= 4,
+          bytes[start - 4] == 0xFF, bytes[start - 3] == 0xE1 else { return data }
+    let segmentLength = (Int(bytes[start - 2]) << 8) | Int(bytes[start - 1])
+    let payloadEnd = start - 2 + segmentLength
+    guard segmentLength >= 2, payloadEnd <= bytes.count else { return data }
+    var payload = replaceUTF8(Data(bytes[start..<payloadEnd]), "xmlns:watermark", "xmlns:\(prefix)")
+    payload = replaceUTF8(payload, "watermark:Marker", "\(prefix):Marker")
+    let newLength = payload.count + 2
+    guard newLength <= 65535 else { return data }
+    var output = Data(bytes[..<(start - 2)])
+    output.append(UInt8((newLength >> 8) & 0xFF))
+    output.append(UInt8(newLength & 0xFF))
+    output.append(payload)
+    output.append(contentsOf: bytes[payloadEnd...])
+    return output
 }
-let prefixedURL = work.appendingPathComponent("prefix-renamed.jpg")
-let prefixedData = swapXMPPrefix(before)
-try prefixedData.write(to: prefixedURL)
-expect(rangeOfASCII([UInt8](prefixedData), [UInt8]("nsprefix1:Marker".utf8), 0) != nil && rangeOfASCII([UInt8](prefixedData), [UInt8]("watermark:Marker".utf8), 0) == nil, "样张里的 XMP 前缀已经换成 nsprefix1")
-let prefixSeen = try fileComment(prefixedURL)
-expect(prefixSeen.xmp, "更换前缀后仍识别到水印标记")
-expect(prefixSeen.hex == hex(blob), "更换前缀后注释字节不变", prefixSeen.hex)
-let prefixErr = Pipe()
-let prefixRun = Process()
-prefixRun.executableURL = URL(fileURLWithPath: "/bin/bash")
-prefixRun.arguments = [script.path, prefixedURL.path]
-prefixRun.standardError = prefixErr
-try prefixRun.run()
-prefixRun.waitUntilExit()
-let prefixText = String(data: prefixErr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-let prefixAfter = try Data(contentsOf: prefixedURL)
-expect(prefixRun.terminationStatus == 0 && prefixText.contains("prefix-renamed.jpg") && prefixText.contains("跳过"), "更换前缀并改名后再次运行被跳过", prefixText)
-expect(prefixedData == prefixAfter && !FileManager.default.fileExists(atPath: outputURL(prefixedURL).path), "更换前缀后跳过时文件没有被改写")
+func expectRenamedPrefix(_ prefix: String, _ filename: String, _ title: String) throws {
+    let url = work.appendingPathComponent(filename)
+    let rewritten = jpegWithXMPPrefix(before, prefix)
+    try rewritten.write(to: url)
+    let bytes = [UInt8](rewritten)
+    expect(countOfASCII(bytes, [UInt8]("xmlns:\(prefix)".utf8)) == 1 && countOfASCII(bytes, [UInt8]("\(prefix):Marker".utf8)) == 2 && countOfASCII(bytes, [UInt8]("watermark:Marker".utf8)) == 0, "\(title) 的声明和起止标签都已替换")
+    let seen = try fileComment(url)
+    expect(seen.xmp, "\(title) 仍识别到水印标记")
+    expect(seen.hex == hex(blob), "\(title) 后注释字节不变", seen.hex)
+    let saved = rewritten
+    let errorPipe = Pipe()
+    let rerun = Process()
+    rerun.executableURL = URL(fileURLWithPath: "/bin/bash")
+    rerun.arguments = [script.path, url.path]
+    rerun.standardError = errorPipe
+    try rerun.run()
+    rerun.waitUntilExit()
+    let text = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let after = try Data(contentsOf: url)
+    expect(rerun.terminationStatus == 0 && text.contains(filename) && text.contains("已有水印标记"), "\(title) 并改名后再次运行被跳过", text)
+    expect(saved == after && !FileManager.default.fileExists(atPath: outputURL(url).path), "\(title) 后没有新成片，文件字节不变")
+}
+try expectRenamedPrefix("nsprefix1", "prefix-renamed.jpg", "更换前缀")
+try expectRenamedPrefix("标记", "xmp-unicode-prefix.jpg", "Unicode 前缀")
 let cjkText = textFromCommentHex((try fileComment(outputURL(cjk))).hex)
 expect(cjkText.hasPrefix("WATERMARK") && cjkText.contains("夜景"), "中文注释的标记写在前面并保留夜景", cjkText)
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))

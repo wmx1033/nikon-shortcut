@@ -119,6 +119,49 @@ func xmpJPEG(_ inner: String) -> Data {
 }
 check("alt prefix attribute", jpegHasXMPMarker(xmpJPEG("<rdf:Description ns1:Marker=\"WATERMARK\" xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\"/>")))
 check("alt prefix element", jpegHasXMPMarker(xmpJPEG("<ns1:Marker xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\">WATERMARK</ns1:Marker>")))
+check("unicode prefix element", jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:标记=\"http://ns.nikon-shortcut/watermark/1.0/\"><标记:Marker>WATERMARK</标记:Marker></rdf:Description>")))
+func resizedPrefix(_ data: Data, _ prefix: String) -> Data {
+    let bytes = [UInt8](data)
+    let signature = [UInt8]("http://ns.adobe.com/xap/1.0/\0".utf8)
+    var start = 0
+    var found = false
+    while start + signature.count <= bytes.count {
+        if Array(bytes[start..<(start + signature.count)]) == signature { found = true; break }
+        start += 1
+    }
+    guard found, start >= 4, bytes[start - 4] == 0xFF, bytes[start - 3] == 0xE1 else { return data }
+    let segmentLength = (Int(bytes[start - 2]) << 8) | Int(bytes[start - 1])
+    let payloadEnd = start - 2 + segmentLength
+    guard segmentLength >= 2, payloadEnd <= bytes.count else { return data }
+    func replace(_ data: Data, _ from: String, _ to: String) -> Data {
+        let source = [UInt8](from.utf8)
+        let target = [UInt8](to.utf8)
+        let input = [UInt8](data)
+        var output: [UInt8] = []
+        var cursor = 0
+        while cursor < input.count {
+            if cursor + source.count <= input.count, Array(input[cursor..<(cursor + source.count)]) == source {
+                output.append(contentsOf: target)
+                cursor += source.count
+            } else {
+                output.append(input[cursor])
+                cursor += 1
+            }
+        }
+        return Data(output)
+    }
+    var payload = replace(Data(bytes[start..<payloadEnd]), "xmlns:watermark", "xmlns:\(prefix)")
+    payload = replace(payload, "watermark:Marker", "\(prefix):Marker")
+    let newLength = payload.count + 2
+    var output = Data(bytes[..<(start - 2)])
+    output.append(UInt8((newLength >> 8) & 0xFF))
+    output.append(UInt8(newLength & 0xFF))
+    output.append(payload)
+    output.append(contentsOf: bytes[payloadEnd...])
+    return output
+}
+let resized = resizedPrefix(binaryFile, "标记")
+check("resized unicode prefix matches", jpegHasXMPMarker(resized) && jpegUserComment(resized) == blob)
 check("ancestor prefix", jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\"><rdf:Description ns1:Marker=\"WATERMARK\"/></rdf:Description>")))
 check("other namespace ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:watermark=\"http://example.com/other/\"><watermark:Marker>WATERMARK</watermark:Marker></rdf:Description>")))
 check("shadowed namespace ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:watermark=\"http://ns.nikon-shortcut/watermark/1.0/\"><rdf:Description xmlns:watermark=\"http://example.com/other/\" watermark:Marker=\"WATERMARK\"/></rdf:Description>")))
