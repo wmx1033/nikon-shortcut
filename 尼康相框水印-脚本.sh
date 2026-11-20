@@ -8,6 +8,8 @@ import CoreLocation
 
 var placeCache: [String:String] = [:]
 let watermarkMarker = "WATERMARK"
+let xmpMarkerNamespace = "http://ns.nikon-shortcut/watermark/1.0/"
+let xmpMarkerLocalName = "Marker"
 let xmpMarkerElement = "<watermark:Marker>WATERMARK</watermark:Marker>"
 
 func isWatermarkFileName(_ stem: String) -> Bool {
@@ -108,9 +110,181 @@ func unicodeCommentBytes(_ text: String) -> Data {
 }
 
 func jpegUserComment(_ jpeg: Data) -> Data? { tiffUserComment(exifTIFF(jpeg)) }
+func xmpText(_ data: Data) -> String {
+    if let text = String(data: data, encoding: .utf8) { return text }
+    return String(data: data, encoding: .isoLatin1) ?? ""
+}
+func xmpHasMarker(_ xml: String) -> Bool {
+    var index = xml.startIndex
+    var scopes: [[String: String]] = [[:]]
+    func skipSpace() {
+        while index < xml.endIndex, xml[index].isWhitespace { index = xml.index(after: index) }
+    }
+    func hasToken(_ token: String) -> Bool { xml[index...].hasPrefix(token) }
+    func take(_ token: String) -> Bool {
+        guard hasToken(token) else { return false }
+        index = xml.index(index, offsetBy: token.count)
+        return true
+    }
+    func isNameStart(_ char: Character) -> Bool {
+        guard let ascii = char.asciiValue else { return false }
+        return (ascii >= 65 && ascii <= 90) || (ascii >= 97 && ascii <= 122) || char == "_"
+    }
+    func isNameNext(_ char: Character) -> Bool {
+        if isNameStart(char) || char == "-" || char == "." || char == ":" { return true }
+        guard let ascii = char.asciiValue else { return false }
+        return ascii >= 48 && ascii <= 57
+    }
+    func readName() -> String? {
+        skipSpace()
+        guard index < xml.endIndex, isNameStart(xml[index]) else { return nil }
+        var name = String(xml[index])
+        index = xml.index(after: index)
+        while index < xml.endIndex, isNameNext(xml[index]) {
+            name.append(xml[index])
+            index = xml.index(after: index)
+        }
+        return name
+    }
+    func decodeEntities(_ raw: String) -> String {
+        var decoded = ""
+        var cursor = raw.startIndex
+        while cursor < raw.endIndex {
+            if raw[cursor] != "&" {
+                decoded.append(raw[cursor])
+                cursor = raw.index(after: cursor)
+                continue
+            }
+            guard let semi = raw[cursor...].firstIndex(of: ";") else {
+                decoded.append(raw[cursor])
+                cursor = raw.index(after: cursor)
+                continue
+            }
+            let token = raw[raw.index(after: cursor)..<semi]
+            if token == "amp" { decoded.append("&") }
+            else if token == "lt" { decoded.append("<") }
+            else if token == "gt" { decoded.append(">") }
+            else if token == "quot" { decoded.append("\"") }
+            else if token == "apos" { decoded.append("'") }
+            else if token.hasPrefix("#") {
+                let digits = token.hasPrefix("#x") || token.hasPrefix("#X") ? token.dropFirst(2) : token.dropFirst()
+                let radix = token.hasPrefix("#x") || token.hasPrefix("#X") ? 16 : 10
+                if let value = UInt32(digits, radix: radix), let scalar = Unicode.Scalar(value) { decoded.append(Character(scalar)) }
+                else { decoded.append(contentsOf: raw[cursor...semi]) }
+            } else { decoded.append(contentsOf: raw[cursor...semi]) }
+            cursor = raw.index(after: semi)
+        }
+        return decoded
+    }
+    func readQuoted() -> String? {
+        skipSpace()
+        guard index < xml.endIndex, xml[index] == "\"" || xml[index] == "'" else { return nil }
+        let quote = xml[index]
+        index = xml.index(after: index)
+        var raw = ""
+        while index < xml.endIndex, xml[index] != quote {
+            raw.append(xml[index])
+            index = xml.index(after: index)
+        }
+        guard index < xml.endIndex else { return nil }
+        index = xml.index(after: index)
+        return decodeEntities(raw)
+    }
+    func parts(_ name: String) -> (prefix: String, local: String) {
+        guard let colon = name.firstIndex(of: ":") else { return ("", name) }
+        return (String(name[..<colon]), String(name[name.index(after: colon)...]))
+    }
+    func namespaceURI(_ prefix: String) -> String? {
+        for scope in scopes.reversed() {
+            if let uri = scope[prefix] { return uri }
+        }
+        return nil
+    }
+    func markerValue(_ prefix: String, _ local: String, _ value: String, attribute: Bool) -> Bool {
+        guard local == xmpMarkerLocalName else { return false }
+        guard value.trimmingCharacters(in: .whitespacesAndNewlines) == watermarkMarker else { return false }
+        if attribute && prefix.isEmpty { return false }
+        return namespaceURI(prefix) == xmpMarkerNamespace
+    }
+    func parseContent() -> (text: String, found: Bool, element: Bool) {
+        var text = ""
+        var found = false
+        var element = false
+        while index < xml.endIndex {
+            if xml[index] != "<" {
+                let start = index
+                while index < xml.endIndex, xml[index] != "<" { index = xml.index(after: index) }
+                text += decodeEntities(String(xml[start..<index]))
+                continue
+            }
+            if hasToken("</") { break }
+            if take("<!--") { if !takeUntil("-->") { break }; continue }
+            if take("<?") { if !takeUntil("?>") { break }; continue }
+            if take("<![CDATA[") {
+                let start = index
+                if !takeUntil("]]>") { break }
+                let end = xml.index(index, offsetBy: -3)
+                text += xml[start..<end]
+                continue
+            }
+            element = true
+            if parseElement() { found = true }
+        }
+        return (text, found, element)
+    }
+    func takeUntil(_ token: String) -> Bool {
+        guard let range = xml.range(of: token, range: index..<xml.endIndex) else { return false }
+        index = range.upperBound
+        return true
+    }
+    func parseElement() -> Bool {
+        guard take("<") else { return false }
+        guard let rawName = readName() else { return false }
+        let name = parts(rawName)
+        var attributes: [(String, String, String)] = []
+        var declared: [String: String] = [:]
+        var selfClosing = false
+        while index < xml.endIndex {
+            skipSpace()
+            if take("/>") { selfClosing = true; break }
+            if take(">") { break }
+            guard let attrName = readName() else { return false }
+            skipSpace()
+            guard take("="), let attrValue = readQuoted() else { return false }
+            if attrName == "xmlns" {
+                declared[""] = attrValue
+            } else if attrName.hasPrefix("xmlns:") {
+                declared[String(attrName.dropFirst("xmlns:".count))] = attrValue
+            } else {
+                let attr = parts(attrName)
+                attributes.append((attr.prefix, attr.local, attrValue))
+            }
+        }
+        scopes.append(declared)
+        defer { scopes.removeLast() }
+        var found = false
+        for attr in attributes {
+            if markerValue(attr.0, attr.1, attr.2, attribute: true) { found = true }
+        }
+        if selfClosing { return found }
+        let inner = parseContent()
+        if inner.found { found = true }
+        if !inner.element && markerValue(name.prefix, name.local, inner.text, attribute: false) { found = true }
+        skipSpace()
+        if take("</") {
+            _ = readName()
+            skipSpace()
+            _ = take(">")
+        }
+        return found
+    }
+    if index < xml.endIndex, xml[index] == "\u{FEFF}" { index = xml.index(after: index) }
+    return parseContent().found
+}
 func jpegHasXMPMarker(_ jpeg: Data) -> Bool {
-    for payload in jpegPayloads(jpeg, marker: 0xE1) where payload.starts(with: Data("http://ns.adobe.com/xap/1.0/\0".utf8)) {
-        if payload.range(of: Data(xmpMarkerElement.utf8)) != nil { return true }
+    let signature = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+    for payload in jpegPayloads(jpeg, marker: 0xE1) where payload.starts(with: signature) {
+        if xmpHasMarker(xmpText(Data(payload.dropFirst(signature.count)))) { return true }
     }
     return false
 }
@@ -121,7 +295,7 @@ func jpegByAddingXMPMarker(_ jpeg: Data) -> Data? {
     <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>
     <x:xmpmeta xmlns:x="adobe:ns:meta/">
      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-      <rdf:Description rdf:about="" xmlns:watermark="http://ns.nikon-shortcut/watermark/1.0/">
+      <rdf:Description rdf:about="" xmlns:watermark="\(xmpMarkerNamespace)">
        \(xmpMarkerElement)
       </rdf:Description>
      </rdf:RDF>

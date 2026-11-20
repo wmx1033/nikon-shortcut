@@ -305,6 +305,56 @@ let secondText = String(data: secondErr.fileHandleForReading.readDataToEndOfFile
 let after = try Data(contentsOf: renamed)
 expect(second.terminationStatus == 0 && secondText.contains("binary-renamed.jpg") && secondText.contains("跳过"), "改名后的二进制成片被跳过", secondText)
 expect(before == after && !FileManager.default.fileExists(atPath: outputURL(renamed).path), "跳过时文件没有被改写")
+func swapASCII(_ data: Data, _ from: String, _ to: String) -> Data {
+    let source = [UInt8](from.utf8)
+    let target = [UInt8](to.utf8)
+    var bytes = [UInt8](data)
+    var cursor = 0
+    while cursor + source.count <= bytes.count {
+        if Array(bytes[cursor..<(cursor + source.count)]) == source {
+            for offset in 0..<target.count { bytes[cursor + offset] = target[offset] }
+            cursor += source.count
+        } else {
+            cursor += 1
+        }
+    }
+    return Data(bytes)
+}
+func rangeOfASCII(_ bytes: [UInt8], _ needle: [UInt8], _ start: Int) -> Int? {
+    var index = start
+    while index + needle.count <= bytes.count {
+        if Array(bytes[index..<(index + needle.count)]) == needle { return index }
+        index += 1
+    }
+    return nil
+}
+func swapXMPPrefix(_ data: Data) -> Data {
+    let bytes = [UInt8](data)
+    let signature = [UInt8]("http://ns.adobe.com/xap/1.0/\0".utf8)
+    let ending = [UInt8]("<?xpacket end=\"w\"?>".utf8)
+    guard let start = rangeOfASCII(bytes, signature, 0), let end = rangeOfASCII(bytes, ending, start) else { return data }
+    let packetEnd = end + ending.count
+    let packet = swapASCII(swapASCII(Data(bytes[start..<packetEnd]), "xmlns:watermark=", "xmlns:nsprefix1="), "watermark:Marker", "nsprefix1:Marker")
+    return Data(bytes[..<start]) + packet + Data(bytes[packetEnd...])
+}
+let prefixedURL = work.appendingPathComponent("prefix-renamed.jpg")
+let prefixedData = swapXMPPrefix(before)
+try prefixedData.write(to: prefixedURL)
+expect(rangeOfASCII([UInt8](prefixedData), [UInt8]("nsprefix1:Marker".utf8), 0) != nil && rangeOfASCII([UInt8](prefixedData), [UInt8]("watermark:Marker".utf8), 0) == nil, "样张里的 XMP 前缀已经换成 nsprefix1")
+let prefixSeen = try fileComment(prefixedURL)
+expect(prefixSeen.xmp, "更换前缀后仍识别到水印标记")
+expect(prefixSeen.hex == hex(blob), "更换前缀后注释字节不变", prefixSeen.hex)
+let prefixErr = Pipe()
+let prefixRun = Process()
+prefixRun.executableURL = URL(fileURLWithPath: "/bin/bash")
+prefixRun.arguments = [script.path, prefixedURL.path]
+prefixRun.standardError = prefixErr
+try prefixRun.run()
+prefixRun.waitUntilExit()
+let prefixText = String(data: prefixErr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+let prefixAfter = try Data(contentsOf: prefixedURL)
+expect(prefixRun.terminationStatus == 0 && prefixText.contains("prefix-renamed.jpg") && prefixText.contains("跳过"), "更换前缀并改名后再次运行被跳过", prefixText)
+expect(prefixedData == prefixAfter && !FileManager.default.fileExists(atPath: outputURL(prefixedURL).path), "更换前缀后跳过时文件没有被改写")
 let cjkText = textFromCommentHex((try fileComment(outputURL(cjk))).hex)
 expect(cjkText.hasPrefix("WATERMARK") && cjkText.contains("夜景"), "中文注释的标记写在前面并保留夜景", cjkText)
 expect(comment(of: outputURL(plain)) == "WATERMARK", "没有原注释时只写 WATERMARK", comment(of: outputURL(plain)))

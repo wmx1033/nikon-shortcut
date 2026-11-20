@@ -94,6 +94,36 @@ check("binary needs xmp", commentNeedsSeparateMarker(blob))
 let binaryFile = jpegByAddingXMPMarker(jpegByReplacingUserComment(Data([0xFF, 0xD8, 0xFF, 0xD9]), blob)!)!
 check("binary file bytes", jpegUserComment(binaryFile) == blob)
 check("binary file xmp", jpegHasXMPMarker(binaryFile))
+func swapASCII(_ data: Data, _ from: String, _ to: String) -> Data {
+    let source = [UInt8](from.utf8)
+    let target = [UInt8](to.utf8)
+    var bytes = [UInt8](data)
+    var cursor = 0
+    while cursor + source.count <= bytes.count {
+        if Array(bytes[cursor..<(cursor + source.count)]) == source {
+            for offset in 0..<target.count { bytes[cursor + offset] = target[offset] }
+            cursor += source.count
+        } else {
+            cursor += 1
+        }
+    }
+    return Data(bytes)
+}
+let rewrittenPrefix = swapASCII(swapASCII(binaryFile, "xmlns:watermark=", "xmlns:nsprefix1="), "watermark:Marker", "nsprefix1:Marker")
+check("rewritten prefix still matches", jpegHasXMPMarker(rewrittenPrefix))
+func xmpJPEG(_ inner: String) -> Data {
+    let xml = "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">" + inner + "</rdf:RDF></x:xmpmeta><?xpacket end=\"w\"?>"
+    var payload = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+    payload.append(contentsOf: Data(xml.utf8))
+    return insertJPEGSegment(Data([0xFF, 0xD8, 0xFF, 0xD9]), payload: payload)!
+}
+check("alt prefix attribute", jpegHasXMPMarker(xmpJPEG("<rdf:Description ns1:Marker=\"WATERMARK\" xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\"/>")))
+check("alt prefix element", jpegHasXMPMarker(xmpJPEG("<ns1:Marker xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\">WATERMARK</ns1:Marker>")))
+check("ancestor prefix", jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\"><rdf:Description ns1:Marker=\"WATERMARK\"/></rdf:Description>")))
+check("other namespace ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:watermark=\"http://example.com/other/\"><watermark:Marker>WATERMARK</watermark:Marker></rdf:Description>")))
+check("shadowed namespace ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:watermark=\"http://ns.nikon-shortcut/watermark/1.0/\"><rdf:Description xmlns:watermark=\"http://example.com/other/\" watermark:Marker=\"WATERMARK\"/></rdf:Description>")))
+check("other value ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\" ns1:Marker=\"OTHER\"/>")))
+check("other local name ignored", !jpegHasXMPMarker(xmpJPEG("<rdf:Description xmlns:ns1=\"http://ns.nikon-shortcut/watermark/1.0/\" ns1:Note=\"WATERMARK\"/>")))
 let zeroHeader = Data(repeating: 0, count: 8) + Data([0x01, 0x00, 0x02, 0xFF, 0x00])
 check("zero header undecoded", exifCommentText(zeroHeader) == nil)
 check("zero header bytes", userCommentWithMarker(zeroHeader) as? Data == zeroHeader)
