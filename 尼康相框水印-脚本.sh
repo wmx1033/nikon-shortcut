@@ -7,7 +7,601 @@ import UniformTypeIdentifiers
 import CoreLocation
 
 var placeCache: [String:String] = [:]
-let watermarkMarker = "NIKON-WATERMARK"
+let watermarkMarker = "WATERMARK"
+let xmpMarkerNamespace = "http://ns.nikon-shortcut/watermark/1.0/"
+let xmpMarkerLocalName = "Marker"
+let xmpMarkerElement = "<watermark:Marker>WATERMARK</watermark:Marker>"
+
+func isWatermarkFileName(_ stem: String) -> Bool {
+    stem.range(of:"-相框(?:-\\d+)?$", options:.regularExpression) != nil
+}
+
+func normalizeCommentText(_ text: String) -> String {
+    guard text.contains("\0") else { return text }
+    for code in ["UNICODE", "Unicode", "ASCII", "JIS"] where text.hasPrefix(code) {
+        var rest = text.dropFirst(code.count)
+        while rest.first == "\0" { rest = rest.dropFirst() }
+        return rest.replacingOccurrences(of:"\0", with:"")
+    }
+    return text.replacingOccurrences(of:"\0", with:"")
+}
+
+func decodedUTF16Comment(_ payload: Data, byteOrder: String.Encoding? = nil) -> String? {
+    if payload.count >= 2 {
+        let prefix = [UInt8](payload.prefix(2))
+        if prefix == [0xFF, 0xFE] || prefix == [0xFE, 0xFF] {
+            guard let decoded = String(data: payload, encoding: .utf16) else { return nil }
+            let cleaned = normalizeCommentText(decoded)
+            return cleaned.isEmpty ? nil : cleaned
+        }
+    }
+    guard let byteOrder = byteOrder, byteOrder == .utf16LittleEndian || byteOrder == .utf16BigEndian else { return nil }
+    guard let decoded = String(data: payload, encoding: byteOrder) else { return nil }
+    let cleaned = normalizeCommentText(decoded)
+    return cleaned.isEmpty ? nil : cleaned
+}
+
+func decodedExifUserComment(_ data: Data, byteOrder: String.Encoding? = nil) -> String? {
+    func text(_ data: Data, _ encodings: [String.Encoding]) -> String? {
+        for encoding in encodings {
+            if let decoded = String(data: data, encoding: encoding) {
+                let cleaned = normalizeCommentText(decoded)
+                if !cleaned.isEmpty { return cleaned }
+            }
+        }
+        return nil
+    }
+    if data.count < 8 { return text(data, [.utf8, .isoLatin1]) }
+    let header = String(data: Data(data.prefix(8)), encoding: .ascii) ?? ""
+    let payload = Data(data.dropFirst(8))
+    if header.hasPrefix("UNICODE") { return decodedUTF16Comment(payload, byteOrder: byteOrder) }
+    if header.hasPrefix("JIS") {
+        guard let decoded = String(data: payload, encoding: .iso2022JP) else { return nil }
+        let cleaned = normalizeCommentText(decoded)
+        if cleaned.isEmpty || cleaned.contains("\u{1B}") { return nil }
+        return cleaned
+    }
+    if header.count == 8 && header.allSatisfy({ $0 == "\0" }) { return nil }
+    if header.hasPrefix("ASCII") {
+        return text(payload, [.utf8, .isoLatin1]) ?? ""
+    }
+    return text(data, [.utf8])
+}
+
+func exifCommentText(_ value: Any?, byteOrder: String.Encoding? = nil) -> String? {
+    if let text = value as? String { return normalizeCommentText(text) }
+    if let data = value as? Data { return decodedExifUserComment(data, byteOrder: byteOrder) }
+    return nil
+}
+
+func commentHasWatermarkMarker(_ text: String) -> Bool {
+    text.components(separatedBy: .newlines).contains { line in
+        let token = line.trimmingCharacters(in: .whitespaces)
+        return token == watermarkMarker || token == "NIKON-WATERMARK"
+    }
+}
+
+func containsWatermarkMarker(_ value: Any?, byteOrder: String.Encoding? = nil) -> Bool {
+    guard let text = exifCommentText(value, byteOrder: byteOrder) else { return false }
+    return commentHasWatermarkMarker(text)
+}
+
+func commentNeedsSeparateMarker(_ value: Any?, byteOrder: String.Encoding? = nil) -> Bool {
+    value != nil && exifCommentText(value, byteOrder: byteOrder) == nil
+}
+
+func userCommentWithMarker(_ value: Any?, byteOrder: String.Encoding? = nil) -> Any {
+    guard let text = exifCommentText(value, byteOrder: byteOrder) else {
+        if let value = value { return value }
+        return watermarkMarker
+    }
+    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return watermarkMarker }
+    if commentHasWatermarkMarker(text) { return text }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.utf8.contains(where: { $0 >= 128 }) { return watermarkMarker + "\n" + trimmed }
+    return trimmed + "\n" + watermarkMarker
+}
+
+func unicodeCommentBytes(_ text: String) -> Data {
+    var data = Data("UNICODE".utf8)
+    data.append(0)
+    data.append(contentsOf: text.data(using: .utf16) ?? Data())
+    return data
+}
+
+func jpegUserComment(_ jpeg: Data) -> Data? { tiffUserComment(exifTIFF(jpeg)) }
+func xmpText(_ data: Data) -> String {
+    if let text = String(data: data, encoding: .utf8) { return text }
+    return String(data: data, encoding: .isoLatin1) ?? ""
+}
+func xmpHasMarker(_ xml: String) -> Bool {
+    var index = xml.startIndex
+    var scopes: [[[UInt32]: String]] = [[:]]
+    let xmlnsName = Array("xmlns".unicodeScalars.map { $0.value })
+    let markerName = Array(xmpMarkerLocalName.unicodeScalars.map { $0.value })
+    func skipSpace() {
+        let scalars = xml.unicodeScalars
+        while index < xml.endIndex {
+            let value = scalars[index].value
+            guard value == 0x20 || value == 0x09 || value == 0x0D || value == 0x0A else { return }
+            index = scalars.index(after: index)
+        }
+    }
+    func hasToken(_ token: String) -> Bool {
+        let scalars = xml.unicodeScalars
+        var cursor = index
+        for scalar in token.unicodeScalars {
+            guard cursor < xml.endIndex, scalars[cursor] == scalar else { return false }
+            cursor = scalars.index(after: cursor)
+        }
+        return true
+    }
+    func take(_ token: String) -> Bool {
+        guard hasToken(token) else { return false }
+        for _ in token.unicodeScalars { index = xml.unicodeScalars.index(after: index) }
+        return true
+    }
+    func slice(_ from: String.Index, _ to: String.Index) -> String {
+        let scalars = xml.unicodeScalars
+        var text = ""
+        var cursor = from
+        while cursor < to {
+            text.unicodeScalars.append(scalars[cursor])
+            cursor = scalars.index(after: cursor)
+        }
+        return text
+    }
+    func isNCNameStart(_ value: UInt32) -> Bool {
+        switch value {
+        case 0x41...0x5A, 0x5F, 0x61...0x7A,
+             0xC0...0xD6, 0xD8...0xF6, 0xF8...0x2FF,
+             0x370...0x37D, 0x37F...0x1FFF, 0x200C...0x200D,
+             0x2070...0x218F, 0x2C00...0x2FEF, 0x3001...0xD7FF,
+             0xF900...0xFDCF, 0xFDF0...0xFFFD, 0x10000...0xEFFFF:
+            return true
+        default:
+            return false
+        }
+    }
+    func isNCNameChar(_ value: UInt32) -> Bool {
+        if isNCNameStart(value) { return true }
+        switch value {
+        case 0x2D, 0x2E, 0x30...0x39, 0xB7, 0x300...0x36F, 0x203F, 0x2040:
+            return true
+        default:
+            return false
+        }
+    }
+    func readNCName() -> [UInt32]? {
+        let scalars = xml.unicodeScalars
+        guard index < xml.endIndex, isNCNameStart(scalars[index].value) else { return nil }
+        var name: [UInt32] = [scalars[index].value]
+        index = scalars.index(after: index)
+        while index < xml.endIndex, isNCNameChar(scalars[index].value) {
+            name.append(scalars[index].value)
+            index = scalars.index(after: index)
+        }
+        return name
+    }
+    func readName() -> (prefix: [UInt32], local: [UInt32])? {
+        skipSpace()
+        guard let first = readNCName() else { return nil }
+        let scalars = xml.unicodeScalars
+        guard index < xml.endIndex, scalars[index].value == 0x3A else { return ([], first) }
+        let saved = index
+        index = scalars.index(after: index)
+        guard let local = readNCName() else {
+            index = saved
+            return ([], first)
+        }
+        return (first, local)
+    }
+    func decodeEntities(_ raw: String) -> String {
+        var decoded = ""
+        var cursor = raw.startIndex
+        while cursor < raw.endIndex {
+            if raw[cursor] != "&" {
+                decoded.append(raw[cursor])
+                cursor = raw.index(after: cursor)
+                continue
+            }
+            guard let semi = raw[cursor...].firstIndex(of: ";") else {
+                decoded.append(raw[cursor])
+                cursor = raw.index(after: cursor)
+                continue
+            }
+            let token = raw[raw.index(after: cursor)..<semi]
+            if token == "amp" { decoded.append("&") }
+            else if token == "lt" { decoded.append("<") }
+            else if token == "gt" { decoded.append(">") }
+            else if token == "quot" { decoded.append("\"") }
+            else if token == "apos" { decoded.append("'") }
+            else if token.hasPrefix("#") {
+                let digits = token.hasPrefix("#x") || token.hasPrefix("#X") ? token.dropFirst(2) : token.dropFirst()
+                let radix = token.hasPrefix("#x") || token.hasPrefix("#X") ? 16 : 10
+                if let value = UInt32(digits, radix: radix), let scalar = Unicode.Scalar(value) { decoded.append(Character(scalar)) }
+                else { decoded.append(contentsOf: raw[cursor...semi]) }
+            } else { decoded.append(contentsOf: raw[cursor...semi]) }
+            cursor = raw.index(after: semi)
+        }
+        return decoded
+    }
+    func readQuoted() -> String? {
+        skipSpace()
+        let scalars = xml.unicodeScalars
+        guard index < xml.endIndex else { return nil }
+        let quote = scalars[index].value
+        guard quote == 0x22 || quote == 0x27 else { return nil }
+        index = scalars.index(after: index)
+        var raw = ""
+        while index < xml.endIndex, scalars[index].value != quote {
+            raw.unicodeScalars.append(scalars[index])
+            index = scalars.index(after: index)
+        }
+        guard index < xml.endIndex else { return nil }
+        index = scalars.index(after: index)
+        return decodeEntities(raw)
+    }
+    func namespaceURI(_ prefix: [UInt32]) -> String? {
+        for scope in scopes.reversed() {
+            if let uri = scope[prefix] { return uri }
+        }
+        return nil
+    }
+    func markerValue(_ prefix: [UInt32], _ local: [UInt32], _ value: String, attribute: Bool) -> Bool {
+        guard local == markerName else { return false }
+        guard value.trimmingCharacters(in: .whitespacesAndNewlines) == watermarkMarker else { return false }
+        if attribute && prefix.isEmpty { return false }
+        return namespaceURI(prefix) == xmpMarkerNamespace
+    }
+    func parseContent() -> (text: String, found: Bool, element: Bool) {
+        var text = ""
+        var found = false
+        var element = false
+        let scalars = xml.unicodeScalars
+        while index < xml.endIndex {
+            if scalars[index].value != 0x3C {
+                let start = index
+                while index < xml.endIndex, scalars[index].value != 0x3C { index = scalars.index(after: index) }
+                text += decodeEntities(slice(start, index))
+                continue
+            }
+            if hasToken("</") { break }
+            if take("<!--") { if !takeUntil("-->") { break }; continue }
+            if take("<?") { if !takeUntil("?>") { break }; continue }
+            if take("<![CDATA[") {
+                let start = index
+                if !takeUntil("]]>") { break }
+                var end = index
+                for _ in 0..<3 { end = scalars.index(before: end) }
+                text += slice(start, end)
+                continue
+            }
+            element = true
+            if parseElement() { found = true }
+        }
+        return (text, found, element)
+    }
+    func takeUntil(_ token: String) -> Bool {
+        let scalars = xml.unicodeScalars
+        let needle = Array(token.unicodeScalars)
+        var cursor = index
+        while cursor < xml.endIndex {
+            var probe = cursor
+            var matched = true
+            for scalar in needle {
+                if probe >= xml.endIndex || scalars[probe] != scalar {
+                    matched = false
+                    break
+                }
+                probe = scalars.index(after: probe)
+            }
+            if matched {
+                index = probe
+                return true
+            }
+            cursor = scalars.index(after: cursor)
+        }
+        return false
+    }
+    func parseElement() -> Bool {
+        guard take("<") else { return false }
+        guard let name = readName() else { return false }
+        var attributes: [([UInt32], [UInt32], String)] = []
+        var declared: [[UInt32]: String] = [:]
+        var selfClosing = false
+        while index < xml.endIndex {
+            skipSpace()
+            if take("/>") { selfClosing = true; break }
+            if take(">") { break }
+            guard let attrName = readName() else { return false }
+            skipSpace()
+            guard take("="), let attrValue = readQuoted() else { return false }
+            if attrName.prefix.isEmpty && attrName.local == xmlnsName {
+                declared[[]] = attrValue
+            } else if attrName.prefix == xmlnsName {
+                declared[attrName.local] = attrValue
+            } else {
+                attributes.append((attrName.prefix, attrName.local, attrValue))
+            }
+        }
+        scopes.append(declared)
+        defer { scopes.removeLast() }
+        var found = false
+        for attr in attributes {
+            if markerValue(attr.0, attr.1, attr.2, attribute: true) { found = true }
+        }
+        if selfClosing { return found }
+        let inner = parseContent()
+        if inner.found { found = true }
+        if !inner.element && markerValue(name.prefix, name.local, inner.text, attribute: false) { found = true }
+        skipSpace()
+        if take("</") {
+            _ = readName()
+            skipSpace()
+            _ = take(">")
+        }
+        return found
+    }
+    if index < xml.endIndex, xml.unicodeScalars[index].value == 0xFEFF {
+        index = xml.unicodeScalars.index(after: index)
+    }
+    return parseContent().found
+}
+func jpegHasXMPMarker(_ jpeg: Data) -> Bool {
+    let signature = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+    for payload in jpegPayloads(jpeg, marker: 0xE1) where payload.starts(with: signature) {
+        if xmpHasMarker(xmpText(Data(payload.dropFirst(signature.count)))) { return true }
+    }
+    return false
+}
+func jpegByAddingXMPMarker(_ jpeg: Data) -> Data? {
+    if jpegHasXMPMarker(jpeg) { return jpeg }
+    var payload = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+    let packet = """
+    <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>
+    <x:xmpmeta xmlns:x="adobe:ns:meta/">
+     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about="" xmlns:watermark="\(xmpMarkerNamespace)">
+       \(xmpMarkerElement)
+      </rdf:Description>
+     </rdf:RDF>
+    </x:xmpmeta>
+    <?xpacket end="w"?>
+    """
+    payload.append(contentsOf: Data(packet.utf8))
+    return insertJPEGSegment(jpeg, payload: payload)
+}
+func committedJPEG(_ jpeg: Data, restoreComment: Data?, stampXMP: Bool) -> Data? {
+    var output = jpeg
+    if let restoreComment = restoreComment {
+        guard let patched = jpegByReplacingUserComment(output, restoreComment) else { return nil }
+        output = patched
+    }
+    if stampXMP {
+        guard let stamped = jpegByAddingXMPMarker(output) else { return nil }
+        output = stamped
+    }
+    return output
+}
+func jpegByReplacingUserComment(_ jpeg: Data, _ comment: Data) -> Data? {
+    let signature = Data("Exif\0\0".utf8)
+    if let payload = jpegPayloads(jpeg, marker: 0xE1).first(where: { $0.starts(with: signature) }),
+       let tiff = tiffBySettingUserComment(Data(payload.dropFirst(6)), comment) {
+        var updated = signature
+        updated.append(tiff)
+        return replaceJPEGPayload(jpeg, marker: 0xE1, matching: signature, payload: updated)
+    }
+    guard let tiff = tiffBySettingUserComment(Data([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), comment) else { return nil }
+    var payload = signature
+    payload.append(tiff)
+    return insertJPEGSegment(jpeg, payload: payload)
+}
+
+func jpegPayloads(_ jpeg: Data, marker: UInt8) -> [Data] {
+    var found: [Data] = []
+    enumerateJPEGSegments(jpeg) { kind, start, end in
+        if kind == marker, start + 4 < end { found.append(Data(jpeg[(start + 4)..<end])) }
+        return true
+    }
+    return found
+}
+func exifTIFF(_ jpeg: Data) -> Data? {
+    let signature = Data("Exif\0\0".utf8)
+    guard let payload = jpegPayloads(jpeg, marker: 0xE1).first(where: { $0.starts(with: signature) }) else { return nil }
+    return Data(payload.dropFirst(6))
+}
+func replaceJPEGPayload(_ jpeg: Data, marker: UInt8, matching signature: Data, payload: Data) -> Data? {
+    var replaced: Data?
+    enumerateJPEGSegments(jpeg) { kind, start, end in
+        guard kind == marker, start + 4 < end, Data(jpeg[(start + 4)..<(start + 4 + signature.count)]) == signature else { return true }
+        replaced = spliceJPEG(jpeg, start: start, end: end, payload: payload)
+        return false
+    }
+    return replaced
+}
+func insertJPEGSegment(_ jpeg: Data, payload: Data) -> Data? {
+    guard jpeg.count >= 2, jpeg[0] == 0xFF, jpeg[1] == 0xD8 else { return nil }
+    return spliceJPEG(jpeg, start: 2, end: 2, payload: payload)
+}
+func spliceJPEG(_ jpeg: Data, start: Int, end: Int, payload: Data) -> Data? {
+    let length = payload.count + 2
+    guard length <= 65535 else { return nil }
+    var out = Data(jpeg[..<start])
+    out.append(contentsOf: [0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)])
+    out.append(payload)
+    out.append(jpeg[end...])
+    return out
+}
+func enumerateJPEGSegments(_ jpeg: Data, _ body: (UInt8, Int, Int) -> Bool) {
+    guard jpeg.count >= 2, jpeg[0] == 0xFF, jpeg[1] == 0xD8 else { return }
+    var index = 2
+    while index + 1 < jpeg.count {
+        if jpeg[index] != 0xFF { return }
+        while index + 1 < jpeg.count && jpeg[index + 1] == 0xFF { index += 1 }
+        let kind = jpeg[index + 1]
+        if kind == 0xD9 || kind == 0xDA { return }
+        if kind == 0x01 || (kind >= 0xD0 && kind <= 0xD7) { index += 2; continue }
+        guard index + 4 <= jpeg.count else { return }
+        let length = (Int(jpeg[index + 2]) << 8) | Int(jpeg[index + 3])
+        guard length >= 2, index + 2 + length <= jpeg.count else { return }
+        if !body(kind, index, index + 2 + length) { return }
+        index += 2 + length
+    }
+}
+func tiffUserComment(_ tiffData: Data?) -> Data? {
+    guard let tiffData = tiffData else { return nil }
+    return tiffBySettingUserComment(tiffData, Data(), readOnly: true)
+}
+func tiffBySettingUserComment(_ tiffData: Data, _ comment: Data, readOnly: Bool = false) -> Data? {
+    var tiff = tiffData
+    guard tiff.count >= 8 else { return nil }
+    let le = tiff[0] == 0x49 && tiff[1] == 0x49
+    guard le || (tiff[0] == 0x4D && tiff[1] == 0x4D) else { return nil }
+    func u16(_ data: Data, _ offset: Int) -> UInt16 {
+        let low = UInt16(data[offset]), high = UInt16(data[offset + 1])
+        return le ? low | (high << 8) : (low << 8) | high
+    }
+    func u32(_ data: Data, _ offset: Int) -> UInt32 {
+        let bytes = (0..<4).map { UInt32(data[offset + $0]) }
+        return le ? bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24) : (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]
+    }
+    func put16(_ value: UInt16) -> [UInt8] { le ? [UInt8(value & 255), UInt8(value >> 8)] : [UInt8(value >> 8), UInt8(value & 255)] }
+    func put32(_ value: UInt32) -> [UInt8] {
+        le ? [UInt8(value & 255), UInt8((value >> 8) & 255), UInt8((value >> 16) & 255), UInt8((value >> 24) & 255)]
+            : [UInt8((value >> 24) & 255), UInt8((value >> 16) & 255), UInt8((value >> 8) & 255), UInt8(value & 255)]
+    }
+    func setBytes(_ bytes: [UInt8], _ offset: Int) { for (shift, byte) in bytes.enumerated() { tiff[offset + shift] = byte } }
+    guard u16(tiff, 2) == 42 else { return nil }
+    func typeSize(_ type: UInt16) -> Int {
+        switch type {
+        case 1, 2, 6, 7: return 1
+        case 3, 8: return 2
+        case 4, 9, 11: return 4
+        case 5, 10, 12: return 8
+        default: return 0
+        }
+    }
+    func located(_ data: Data, ifd: Int, tag: UInt16) -> Int? {
+        guard ifd >= 8, ifd + 2 <= data.count else { return nil }
+        let count = Int(u16(data, ifd))
+        let end = ifd + 2 + count * 12 + 4
+        guard count < 10000, end <= data.count else { return nil }
+        for item in 0..<count {
+            let at = ifd + 2 + item * 12
+            if u16(data, at) == tag { return at }
+        }
+        return nil
+    }
+    func bytes(at entry: Int) -> Data? {
+        let size = typeSize(u16(tiff, entry + 2)) * Int(u32(tiff, entry + 4))
+        guard size > 0, size < 10_000_000 else { return nil }
+        if size <= 4 { return Data(tiff[(entry + 8)..<(entry + 8 + size)]) }
+        let offset = Int(u32(tiff, entry + 8))
+        guard offset >= 8, offset + size <= tiff.count else { return nil }
+        return Data(tiff[offset..<(offset + size)])
+    }
+    let ifd0 = Int(u32(tiff, 4))
+    var commentAt = located(tiff, ifd: ifd0, tag: 0x9286)
+    let exifEntry = located(tiff, ifd: ifd0, tag: 0x8769)
+    var exifIFD: Int?
+    if let exifEntry {
+        exifIFD = Int(u32(tiff, exifEntry + 8))
+        if commentAt == nil, let exifIFD { commentAt = located(tiff, ifd: exifIFD, tag: 0x9286) }
+    }
+    if readOnly { return commentAt.flatMap { bytes(at: $0) } }
+    func align() { if tiff.count % 2 == 1 { tiff.append(0) } }
+    align()
+    let valueAt = tiff.count
+    if comment.count > 4 { tiff.append(comment) }
+    func inlineEntry(tag: UInt16, type: UInt16, count: UInt32, bytes: Data) -> Data {
+        var inline = Data(bytes)
+        while inline.count < 4 { inline.append(0) }
+        var data = Data(put16(tag))
+        data.append(contentsOf: put16(type))
+        data.append(contentsOf: put32(count))
+        data.append(inline.prefix(4))
+        return data
+    }
+    func entry(tag: UInt16, type: UInt16, count: UInt32, value: UInt32) -> Data {
+        var data = Data(put16(tag))
+        data.append(contentsOf: put16(type))
+        data.append(contentsOf: put32(count))
+        data.append(contentsOf: put32(value))
+        return data
+    }
+    func directoryEnd(_ ifd: Int) -> Int? {
+        guard ifd >= 8, ifd + 2 <= tiff.count else { return nil }
+        let count = Int(u16(tiff, ifd))
+        let end = ifd + 2 + count * 12 + 4
+        guard count < 10000, end <= tiff.count else { return nil }
+        return end
+    }
+    func copiedIFD(_ ifd: Int, extra: Data) -> Int? {
+        guard extra.count == 12, let end = directoryEnd(ifd) else { return nil }
+        let count = Int(u16(tiff, ifd))
+        let extraTag = u16(extra, 0)
+        var entries: [Data] = []
+        var replaced = false
+        for item in 0..<count {
+            let entry = Data(tiff[(ifd + 2 + item * 12)..<(ifd + 2 + item * 12 + 12)])
+            if u16(entry, 0) == extraTag {
+                entries.append(extra)
+                replaced = true
+            } else {
+                entries.append(entry)
+            }
+        }
+        if !replaced { entries.append(extra) }
+        entries.sort { u16($0, 0) < u16($1, 0) }
+        let next = Data(tiff[(end - 4)..<end])
+        align()
+        let at = tiff.count
+        var block = Data(put16(UInt16(entries.count)))
+        for entry in entries { block.append(entry) }
+        block.append(next)
+        tiff.append(block)
+        return at
+    }
+    let commentEntry = comment.count <= 4 ? inlineEntry(tag: 0x9286, type: 7, count: UInt32(comment.count), bytes: comment) : entry(tag: 0x9286, type: 7, count: UInt32(comment.count), value: UInt32(valueAt))
+    if let commentAt {
+        if let exifIFD, let exifEntry, let end = directoryEnd(exifIFD), (exifIFD..<end).contains(commentAt),
+           let moved = copiedIFD(exifIFD, extra: commentEntry) {
+            setBytes(put32(UInt32(moved)), exifEntry + 8)
+            return tiff
+        }
+        guard let moved = copiedIFD(ifd0, extra: commentEntry) else { return nil }
+        setBytes(put32(UInt32(moved)), 4)
+        return tiff
+    }
+    if let exifEntry, let exifIFD, let moved = copiedIFD(exifIFD, extra: commentEntry) {
+        setBytes(put32(UInt32(moved)), exifEntry + 8)
+        return tiff
+    }
+    align()
+    let exifAt = tiff.count
+    var exif = Data(put16(1))
+    exif.append(commentEntry)
+    exif.append(contentsOf: [0, 0, 0, 0])
+    tiff.append(exif)
+    guard let moved = copiedIFD(ifd0, extra: entry(tag: 0x8769, type: 4, count: 1, value: UInt32(exifAt))) else { return nil }
+    setBytes(put32(UInt32(moved)), 4)
+    return tiff
+}
+
+func colorSpaceNeedsSRGB(_ name: String?) -> Bool {
+    guard let name = name else { return true }
+    return ["kCGColorSpaceAdobeRGB1998", "kCGColorSpaceROMMRGB", "kCGColorSpaceWideGamutRGB"].contains(name)
+}
+
+func renderedColor(for photo: CGImage) -> (space: CGColorSpace, convertsToSRGB: Bool) {
+    let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+    guard let space = photo.colorSpace else { return (srgb, true) }
+    let name = space.name as String?
+    if colorSpaceNeedsSRGB(name) { return (srgb, true) }
+    return (space, false)
+}
+
 func locationCaption(_ metadata:[String:Any]) -> String {
     guard let gps = metadata["{GPS}"] as? [String:Any],
           let lat = gps["Latitude"] as? Double, let lon = gps["Longitude"] as? Double,
@@ -57,18 +651,10 @@ func shutterString(_ t: Double) -> String {
     return "1/\(format(r)) s"
 }
 
-func workingColorSpace(for photo: CGImage) -> CGColorSpace {
-    let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
-    guard let space = photo.colorSpace, let name = space.name as String? else { return srgb }
-    let workingSpaces: Set<String> = ["kCGColorSpaceAdobeRGB1998", "kCGColorSpaceROMMRGB", "kCGColorSpaceWideGamutRGB"]
-    if workingSpaces.contains(name) { return srgb }
-    return space
-}
-
 for path in CommandLine.arguments.dropFirst() {
     do {
         let url = URL(fileURLWithPath: path)
-        if url.deletingPathExtension().lastPathComponent.contains("-相框") {
+        if isWatermarkFileName(url.deletingPathExtension().lastPathComponent) {
             FileHandle.standardError.write(Data(("跳过：\(path)（已经是带水印的文件）\n").utf8))
             continue
         }
@@ -76,8 +662,10 @@ for path in CommandLine.arguments.dropFirst() {
               let meta = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
               let w = meta["PixelWidth"] as? Int, let h = meta["PixelHeight"] as? Int else { throw CocoaError(.fileReadCorruptFile) }
         let srcExif = meta[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
-        if (srcExif[kCGImagePropertyExifUserComment as String] as? String) == watermarkMarker {
-            FileHandle.standardError.write(Data(("跳过：\(path)（EXIF 标记已带水印）\n").utf8))
+        let fileData = (try? Data(contentsOf: url)) ?? Data()
+        let commentValue: Any? = jpegUserComment(fileData) ?? srcExif[kCGImagePropertyExifUserComment as String]
+        if containsWatermarkMarker(commentValue) || jpegHasXMPMarker(fileData) {
+            FileHandle.standardError.write(Data(("跳过：\(path)（已有水印标记）\n").utf8))
             continue
         }
         let place = locationCaption(meta)
@@ -86,14 +674,15 @@ for path in CommandLine.arguments.dropFirst() {
         let width = CGFloat(photo.width), height = CGFloat(photo.height)
         let edge = max(1, (width * 0.022).rounded())
         let band = max(8, (width * 0.079).rounded())
-        guard let ctx = CGContext(data:nil,width:Int(width+2*edge),height:Int(height+band+edge),bitsPerComponent:8,bytesPerRow:0,space:workingColorSpace(for:photo),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw CocoaError(.fileWriteUnknown) }
+        let color = renderedColor(for: photo)
+        guard let ctx = CGContext(data:nil,width:Int(width+2*edge),height:Int(height+band+edge),bitsPerComponent:8,bytesPerRow:0,space:color.space,bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw CocoaError(.fileWriteUnknown) }
         ctx.setFillColor(CGColor(gray:1,alpha:1))
         ctx.fill(CGRect(x:0,y:0,width:width+2*edge,height:height+band+edge))
         ctx.draw(photo,in:CGRect(x:edge,y:band,width:width,height:height))
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext:ctx, flipped:false)
         let ex = meta["{Exif}"] as? [String:Any] ?? [:]
-        let model = (meta["{TIFF}"] as? [String:Any])?["Model"] as? String ?? "Nikon"
+        let model = ((meta["{TIFF}"] as? [String:Any])?["Model"] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
         var fields = [String]()
         if let f = ex["FocalLength"] as? NSNumber { fields.append("\(f) mm") }
         if let f = ex["FNumber"] as? NSNumber { fields.append("f/\(f)") }
@@ -192,22 +781,42 @@ for path in CommandLine.arguments.dropFirst() {
         outMeta[kCGImagePropertyPixelWidth as String] = nil
         outMeta[kCGImagePropertyPixelHeight as String] = nil
         outMeta[kCGImagePropertyProfileName as String] = nil
+        if color.convertsToSRGB {
+            for key in Array(outMeta.keys) where key.uppercased().contains("ICC") { outMeta.removeValue(forKey: key) }
+        }
         outMeta[kCGImagePropertyColorModel as String] = nil
         outMeta[kCGImagePropertyDepth as String] = nil
         outMeta[kCGImagePropertyDPIWidth as String] = nil
         outMeta[kCGImagePropertyDPIHeight as String] = nil
         outMeta[kCGImagePropertyHasAlpha as String] = nil
         var outExif = (outMeta[kCGImagePropertyExifDictionary as String] as? [String: Any]) ?? [:]
-        outExif[kCGImagePropertyExifUserComment as String] = watermarkMarker
+        let updatedComment = userCommentWithMarker(commentValue)
+        var restoreComment: Data? = nil
+        var stampXMP = false
+        if let text = updatedComment as? String {
+            if text.utf8.contains(where: { $0 >= 128 }) {
+                restoreComment = unicodeCommentBytes(text)
+                outExif.removeValue(forKey: kCGImagePropertyExifUserComment as String)
+            } else {
+                outExif[kCGImagePropertyExifUserComment as String] = text
+            }
+        } else if let raw = updatedComment as? Data {
+            restoreComment = raw
+            stampXMP = true
+            outExif.removeValue(forKey: kCGImagePropertyExifUserComment as String)
+        }
         outMeta[kCGImagePropertyExifDictionary as String] = outExif
         outMeta[kCGImageDestinationLossyCompressionQuality as String] = 0.96
         CGImageDestinationAddImage(dest,image,outMeta as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
+        guard let output = committedJPEG(data as Data, restoreComment: restoreComment, stampXMP: stampXMP) else {
+            throw NSError(domain: "NikonWatermark", code: 1, userInfo: [NSLocalizedDescriptionKey: "EXIF 注释写回失败"])
+        }
         var n = 1
         while true {
             let suffix = n == 1 ? "" : "-\(n)"
             let out = URL(fileURLWithPath:url.deletingPathExtension().path+"-相框"+suffix+".jpg")
-            do { try (data as Data).write(to:out,options:.withoutOverwriting); break }
+            do { try output.write(to:out,options:.withoutOverwriting); break }
             catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError { n += 1 }
         }
     } catch {

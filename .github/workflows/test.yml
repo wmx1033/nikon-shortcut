@@ -1,0 +1,23 @@
+name: 成片检查
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  p0:
+    name: macOS 上核对四项判断
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 ExifTool
+        run: brew install exiftool
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+      - name: 纯逻辑
+        run: bash Tests/run-logic.sh
+      - name: 用脚本处理样张
+        run: swift Tests/p0.swift
